@@ -102,6 +102,45 @@
     50% { opacity: 0.97; }
     100% { opacity: 1; }
   }
+
+  /* ── Mobile controls ─────────────────────────────────── */
+  #mobile-controls {
+    display: none;
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    z-index: 10;
+  }
+  #mobile-controls.active { display: block; }
+
+  .m-corner {
+    position: absolute;
+    width: 36px; height: 36px;
+    pointer-events: all;
+    opacity: 0.28;
+    transition: opacity 0.1s;
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Press Start 2P', monospace;
+    font-size: 10px;
+    color: #ff9900;
+    background: rgba(10,5,0,0.7);
+    border: 1px solid #442200;
+    cursor: pointer;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .m-corner:active, .m-corner.pressed { opacity: 0.85; background: rgba(40,20,0,0.9); }
+
+  #mc-lore  { top: 6px;    left: 6px; }
+  #mc-shop  { top: 6px;    right: 6px; }
+  #mc-inv   { bottom: 6px; left: 6px; }
+  #mc-mute  { bottom: 6px; right: 6px; }
+
+  /* Touch zones — invisible, pointer-events only */
+  #tz-left  { position:absolute; left:0;    top:0; width:50%; height:100%; pointer-events:all; }
+  #tz-right { position:absolute; right:0;   top:0; width:50%; height:100%; pointer-events:all; }
+
 </style>
 </head>
 <body>
@@ -110,6 +149,17 @@
   <div id="canvas-wrapper">
     <canvas id="game"></canvas>
     <div id="crt"></div>
+    <div id="mobile-controls">
+      <!-- touch zones (invisible) -->
+      <div id="tz-left"></div>
+      <div id="tz-right"></div>
+      <!-- corner menu icons -->
+      <div class="m-corner" id="mc-lore"  title="Lore">&#x1F4DC;</div>
+      <div class="m-corner" id="mc-shop"  title="Shop">&#x1FA99;</div>
+      <div class="m-corner" id="mc-inv"   title="Inventory">&#x1F392;</div>
+      <div class="m-corner" id="mc-mute"  title="Mute">&#x1F50A;</div>
+    </div>
+
   </div>
   <div id="hud">
     <span id="hud-pos">X:0 Y:0</span>
@@ -1932,7 +1982,7 @@ function isGateChunk(cx, cy) {
   const a = sActOf(cx, cy);
   if (!a || a >= 5) return false; // act 5 has no gate
   const localCy = cy - (a-1)*S_ACT_H;
-  return localCy === S_ACT_H-1;
+  return localCy === S_ACT_H-1 && cx !== 5; // cx=5 is the boss chunk, not a gate
 }
 
 // World-tile position of the act boss spawn
@@ -2826,7 +2876,7 @@ function tickEnemies(dt, timestamp) {
   const pcx = Math.floor(player.wx/CHUNK), pcy = Math.floor(player.wy/CHUNK);
   for (let dy = -2; dy <= 2; dy++)
     for (let dx = -2; dx <= 2; dx++)
-      if (!ghost || !ghost.active) spawnEnemiesForChunk(pcx+dx, pcy+dy);
+      spawnEnemiesForChunk(pcx+dx, pcy+dy);
 
   // Remove enemies too far away
   for (let i = enemies.length-1; i >= 0; i--) {
@@ -2962,6 +3012,95 @@ function tickEnemies(dt, timestamp) {
         }
         // ── BOSS SPECIAL ATTACKS (story only) ──────────────
         if (e.isStoryBoss) {
+          const _hpPct = e.hp / e.maxHp;
+
+          // Phase 2 trigger (50% HP) — one-time speed boost + banner
+          if (_hpPct <= 0.50 && !e._phase2) {
+            e._phase2 = true;
+            e.def.moveInterval = Math.floor(e.def.moveInterval * 0.65);
+            banners.push({ text: (e.def ? e.def.name : 'BOSS') + ' — PHASE 2', color: '#ff4400', life: 3000, maxLife: 3000 });
+            triggerFlash('#ff440033', 600);
+            triggerShake(6, 400);
+            SFX.play('boss_attack');
+          }
+
+          // Enrage trigger (25% HP) — one-time, harder/faster
+          if (_hpPct <= 0.25 && !e._enraged) {
+            e._enraged = true;
+            e.def.moveInterval = Math.floor(e.def.moveInterval * 0.55);
+            e.def.dmg = (e.def.dmg || 3) + 2;
+            banners.push({ text: '☠ ' + (e.def.name||'BOSS') + ' ENRAGED ☠', color: '#cc00ff', life: 3500, maxLife: 3500 });
+            triggerFlash('#aa00cc55', 800);
+            triggerShake(10, 600);
+            SFX.play('boss_die'); // reuse big boom sfx
+          }
+
+          // Shield phase — triggers once at ~60% HP, lasts 3000ms
+          if (_hpPct <= 0.60 && !e._shieldUsed) {
+            e._shieldUsed = true;
+            e._shieldActive = true;
+            e._shieldTimer = 3000;
+            banners.push({ text: 'SHIELD ACTIVE — WAIT IT OUT', color: '#8888cc', life: 3000, maxLife: 3000 });
+            triggerFlash('#8888cc33', 400);
+            SFX.play('boss_attack');
+          }
+          // Tick shield timer
+          if (e._shieldActive) {
+            e._shieldTimer = (e._shieldTimer || 0) - dt;
+            if (e._shieldTimer <= 0) {
+              e._shieldActive = false;
+              // Shield drop shockwave
+              const dirs2 = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,1],[1,-1],[-1,-1]];
+              dirs2.forEach(([ox,oy]) => {
+                for (let r2=1;r2<=4;r2++) {
+                  projectiles.push({ wx:e.wx+ox*r2, wy:e.wy+oy*r2, px:(e.wx+ox*r2)*TILE+8, py:(e.wy+oy*r2)*TILE+8,
+                    dx:ox, dy:oy, speed:0.06, dmg:1, type:'boss_wave', life:500, maxLife:500, color:'#8888ff', charged:false });
+                }
+              });
+              triggerFlash('#8888ff44', 500);
+              triggerShake(8, 400);
+              SFX.play('boss_attack');
+              banners.push({ text: 'SHIELD BROKEN', color: '#8888cc', life: 2000, maxLife: 2000 });
+            }
+            e.moveTimer = Math.max(e.moveTimer, 999); // frozen while shielded
+          }
+
+          // Charge telegraph + dash
+          e._chargeTimer = (e._chargeTimer || 0) - dt;
+          e._chargeTelegraph = Math.max(0, (e._chargeTelegraph || 0) - dt);
+          const chargeInterval = e._enraged ? 4000 : 7000;
+          if (e._chargeTimer <= 0 && !e._shieldActive && distTiles > 2 && distTiles < 12) {
+            e._chargeTimer = chargeInterval + Math.random() * 2000;
+            e._chargeTelegraph = 600;
+            // After 600ms, dash
+            const _edx4 = edx, _edy4 = edy, _edist4 = distTiles;
+            setTimeout(() => {
+              if (!e || e.hp <= 0) return;
+              e._chargeTelegraph = 0;
+              // Dash up to 5 tiles toward player
+              const stepX = _edx4 > 0 ? 1 : _edx4 < 0 ? -1 : 0;
+              const stepY = _edy4 > 0 ? 1 : _edy4 < 0 ? -1 : 0;
+              let moved = 0;
+              while (moved < 5) {
+                const nx3 = e.wx + stepX, ny3 = e.wy + stepY;
+                if (!isWalkable(nx3, ny3)) break;
+                e.wx = nx3; e.wy = ny3;
+                e.px = e.wx * TILE; e.py = e.wy * TILE;
+                moved++;
+                // Damage if landed on player
+                if (e.wx === player.wx && e.wy === player.wy && player.invincible <= 0) {
+                  let _cdmg = Math.max(1, (e.def.dmg||3) - player.armor);
+                  player.hp -= _cdmg; player.invincible = 1200;
+                  spawnFloatText(player.wx, player.wy, 'CHARGE! -' + _cdmg, '#ff4400');
+                  triggerShake(6, 300); triggerFlash('#ff220033', 200);
+                  SFX.play('boss_attack'); break;
+                }
+              }
+              spawnFloatText(e.wx, e.wy, 'CHARGE!', e.def.color || '#ff4400');
+              SFX.play('boss_attack');
+            }, 600);
+          }
+
           e.specialTimer = (e.specialTimer || 0) + 1;
           const specialEvery = [0, 5, 4, 5, 4, 3][e.actNum] || 5; // moves between specials
 
@@ -3195,11 +3334,202 @@ function drawEnemies(timestamp) {
       ctx.fillStyle = `rgba(255,200,0,${a*0.7})`;
       ctx.fillRect(bx+2, by+2, 3, 3); ctx.fillRect(bx+sz-5, by+2, 3, 3);
     } else if (isBoss) {
-      ctx.fillRect(bx-2, by+1, sz+4, sz-1); ctx.fillRect(bx, by, sz, sz+1);
-      ctx.fillStyle = `rgba(255,255,0,${a})`;
-      ctx.fillRect(bx+2, by+2, 3, 3); ctx.fillRect(bx+sz-5, by+2, 3, 3);
-      ctx.fillStyle = `rgba(255,200,0,${a})`;
-      ctx.fillRect(bx+1, by-3, 2, 4); ctx.fillRect(bx+sz/2-1, by-4, 3, 5); ctx.fillRect(bx+sz-3, by-3, 2, 4);
+      ctx.save();
+      const pulse = 0.75 + Math.sin(timestamp * 0.003 + e.wx) * 0.25;
+      const bname = def.name || '';
+
+      if (bname.includes('WARDEN') && !bname.includes('FIRST')) {
+        // ── THE WARDEN — armoured stone guardian ──────────────
+        // Outer glow
+        ctx.globalAlpha = a * 0.18 * pulse;
+        const gw = ctx.createRadialGradient(sx+8,sy2+8,0,sx+8,sy2+8,22);
+        gw.addColorStop(0,'#ff6600'); gw.addColorStop(1,'transparent');
+        ctx.fillStyle=gw; ctx.fillRect(sx-14,sy2-14,44,44);
+        ctx.globalAlpha = a;
+        // Legs
+        ctx.fillStyle=`rgba(100,40,10,${a})`; ctx.fillRect(bx+2,by+sz-4,5,5); ctx.fillRect(bx+sz-7,by+sz-4,5,5);
+        // Body — broad stone torso
+        ctx.fillStyle=`rgba(${hexToRgb(def.color)},${a})`;
+        ctx.fillRect(bx,by+4,sz,sz-4);
+        // Armour plates — darker
+        ctx.fillStyle=`rgba(90,30,5,${a})`;
+        ctx.fillRect(bx+1,by+5,sz-2,3); ctx.fillRect(bx+1,by+10,sz-2,2);
+        // Shoulders
+        ctx.fillStyle=`rgba(${hexToRgb(def.color)},${a})`;
+        ctx.fillRect(bx-3,by+4,4,7); ctx.fillRect(bx+sz-1,by+4,4,7);
+        // Head — square helmet
+        ctx.fillStyle=`rgba(140,50,10,${a})`;
+        ctx.fillRect(bx+3,by,sz-6,6);
+        ctx.fillStyle=`rgba(${hexToRgb(def.color)},${a})`;
+        ctx.fillRect(bx+2,by-1,sz-4,5);
+        // Visor slit — glowing
+        ctx.fillStyle=`rgba(255,180,0,${a*pulse})`;
+        ctx.fillRect(bx+4,by+1,sz-8,2);
+        // Weapon — left arm axe
+        ctx.fillStyle=`rgba(160,160,160,${a})`; ctx.fillRect(bx-6,by+2,3,10);
+        ctx.fillStyle=`rgba(200,200,200,${a})`; ctx.fillRect(bx-8,by+2,4,5);
+        // Shadow under feet
+        ctx.fillStyle=`rgba(0,0,0,${a*0.4})`; ctx.fillRect(bx,by+sz+1,sz,2);
+
+      } else if (bname.includes('BONE')) {
+        // ── BONE SOVEREIGN — tall skeletal king ───────────────
+        ctx.globalAlpha = a * 0.15 * pulse;
+        const gb = ctx.createRadialGradient(sx+8,sy2+4,0,sx+8,sy2+4,24);
+        gb.addColorStop(0,'#ffffcc'); gb.addColorStop(1,'transparent');
+        ctx.fillStyle=gb; ctx.fillRect(sx-16,sy2-16,48,48);
+        ctx.globalAlpha = a;
+        // Robe bottom
+        ctx.fillStyle=`rgba(40,30,20,${a})`;
+        ctx.fillRect(bx+2,by+sz-5,sz-4,6);
+        // Ribcage body
+        ctx.fillStyle=`rgba(${hexToRgb(def.color)},${a})`;
+        ctx.fillRect(bx+3,by+5,sz-6,sz-8);
+        // Ribs — dark lines
+        ctx.fillStyle=`rgba(100,90,70,${a*0.8})`;
+        for(let r=0;r<4;r++) ctx.fillRect(bx+4,by+7+r*3,sz-8,1);
+        // Spine
+        ctx.fillStyle=`rgba(${hexToRgb(def.color)},${a*0.9})`;
+        ctx.fillRect(bx+sz/2-1,by+5,2,sz-8);
+        // Arms — thin bone limbs
+        ctx.fillStyle=`rgba(${hexToRgb(def.color)},${a})`;
+        ctx.fillRect(bx-4,by+6,4,sz-12); ctx.fillRect(bx+sz,by+6,4,sz-12);
+        // Claw fingers
+        ctx.fillRect(bx-5,by+sz-8,2,4); ctx.fillRect(bx-4,by+sz-8,1,5);
+        ctx.fillRect(bx+sz+3,by+sz-8,2,4); ctx.fillRect(bx+sz+3,by+sz-7,1,5);
+        // Skull head
+        ctx.fillStyle=`rgba(${hexToRgb(def.color)},${a})`;
+        ctx.fillRect(bx+2,by-2,sz-4,7);
+        ctx.fillRect(bx+4,by-4,sz-8,4);
+        // Eye sockets
+        ctx.fillStyle=`rgba(0,0,0,${a})`;
+        ctx.fillRect(bx+4,by-1,3,3); ctx.fillRect(bx+sz-7,by-1,3,3);
+        // Eye glow
+        ctx.fillStyle=`rgba(255,50,0,${a*pulse})`;
+        ctx.fillRect(bx+5,by,1,1); ctx.fillRect(bx+sz-6,by,1,1);
+        // Crown
+        ctx.fillStyle=`rgba(255,220,50,${a})`;
+        ctx.fillRect(bx+3,by-5,2,4); ctx.fillRect(bx+sz/2-1,by-6,3,5); ctx.fillRect(bx+sz-5,by-5,2,4);
+        ctx.fillRect(bx+3,by-4,sz-6,2);
+
+      } else if (bname.includes('HOLLOW')) {
+        // ── THE HOLLOW — writhing cave creature ───────────────
+        const wob = Math.sin(timestamp*0.006)*2;
+        ctx.globalAlpha = a * 0.2 * pulse;
+        const gh = ctx.createRadialGradient(sx+8,sy2+8,0,sx+8,sy2+8,20);
+        gh.addColorStop(0,'#44ff88'); gh.addColorStop(1,'transparent');
+        ctx.fillStyle=gh; ctx.fillRect(sx-12,sy2-12,40,40);
+        ctx.globalAlpha = a;
+        // Writhing body — asymmetric blob
+        ctx.fillStyle=`rgba(${hexToRgb(def.color)},${a})`;
+        ctx.fillRect(bx+1,by+3+wob,sz-2,sz-5);
+        ctx.fillRect(bx+3,by+1+wob,sz-6,sz-2);
+        ctx.fillRect(bx,by+5+wob,sz,sz-8);
+        // Texture — dark patches
+        ctx.fillStyle=`rgba(20,50,15,${a*0.7})`;
+        ctx.fillRect(bx+3,by+5+wob,4,3); ctx.fillRect(bx+sz-7,by+7+wob,4,3);
+        ctx.fillRect(bx+6,by+10+wob,3,4);
+        // Tendrils
+        ctx.fillStyle=`rgba(${hexToRgb(def.color)},${a*0.7})`;
+        ctx.fillRect(bx-3,by+sz-4+wob,3,6); ctx.fillRect(bx-4,by+sz-1+wob,2,4);
+        ctx.fillRect(bx+sz,by+sz-5+wob,3,6); ctx.fillRect(bx+sz+1,by+sz-2+wob,2,4);
+        ctx.fillRect(bx+sz/2-1,by+sz+wob,2,5);
+        // Eyes — cluster of 4
+        ctx.fillStyle=`rgba(255,255,100,${a*pulse})`;
+        ctx.fillRect(bx+3,by+4+wob,2,2); ctx.fillRect(bx+7,by+3+wob,2,2);
+        ctx.fillRect(bx+sz-5,by+4+wob,2,2); ctx.fillRect(bx+sz-9,by+5+wob,2,2);
+        // Maw
+        ctx.fillStyle=`rgba(0,0,0,${a})`;
+        ctx.fillRect(bx+4,by+sz-6+wob,sz-8,3);
+        ctx.fillStyle=`rgba(200,255,150,${a*0.5})`;
+        ctx.fillRect(bx+5,by+sz-5+wob,2,1); ctx.fillRect(bx+sz-7,by+sz-5+wob,2,1);
+
+      } else if (bname.includes('FIRST')) {
+        // ── THE FIRST WARDEN — ice/crystal armour ─────────────
+        const shimmer = 0.5+Math.abs(Math.sin(timestamp*0.004))*0.5;
+        ctx.globalAlpha = a * 0.22 * shimmer;
+        const gf = ctx.createRadialGradient(sx+8,sy2+4,0,sx+8,sy2+4,26);
+        gf.addColorStop(0,'#ffffff'); gf.addColorStop(1,'transparent');
+        ctx.fillStyle=gf; ctx.fillRect(sx-18,sy2-18,52,52);
+        ctx.globalAlpha = a;
+        // Body
+        ctx.fillStyle=`rgba(${hexToRgb(def.color)},${a})`;
+        ctx.fillRect(bx+1,by+4,sz-2,sz-4);
+        // Crystal plates
+        ctx.fillStyle=`rgba(200,230,255,${a*0.8})`;
+        ctx.fillRect(bx,by+6,3,sz-8); ctx.fillRect(bx+sz-3,by+6,3,sz-8);
+        ctx.fillRect(bx+4,by+4,sz-8,3);
+        // Ice crack lines
+        ctx.fillStyle=`rgba(100,180,255,${a*0.5})`;
+        ctx.fillRect(bx+5,by+9,1,sz-10); ctx.fillRect(bx+sz-6,by+9,1,sz-10);
+        ctx.fillRect(bx+7,by+6,sz-14,1);
+        // Shoulders — spiked
+        ctx.fillStyle=`rgba(${hexToRgb(def.color)},${a})`;
+        ctx.fillRect(bx-4,by+4,5,8); ctx.fillRect(bx+sz-1,by+4,5,8);
+        ctx.fillStyle=`rgba(200,230,255,${a})`; // ice spikes
+        ctx.fillRect(bx-5,by+2,2,5); ctx.fillRect(bx+sz+3,by+2,2,5);
+        // Helmet
+        ctx.fillStyle=`rgba(${hexToRgb(def.color)},${a})`;
+        ctx.fillRect(bx+2,by-1,sz-4,6);
+        ctx.fillRect(bx+4,by-3,sz-8,4);
+        // Ice visor
+        ctx.fillStyle=`rgba(150,220,255,${a*shimmer})`;
+        ctx.fillRect(bx+4,by,sz-8,2);
+        // Crystal shards top
+        ctx.fillStyle=`rgba(200,240,255,${a})`;
+        ctx.fillRect(bx+2,by-5,2,5); ctx.fillRect(bx+sz/2-1,by-7,3,6); ctx.fillRect(bx+sz-4,by-5,2,5);
+        // Shimmer sparkles
+        if(shimmer>0.8){
+          ctx.fillStyle=`rgba(255,255,255,${a*(shimmer-0.8)*5})`;
+          ctx.fillRect(bx+3,by+8,1,1); ctx.fillRect(bx+sz-5,by+12,1,1); ctx.fillRect(bx+7,by+sz-5,1,1);
+        }
+
+      } else {
+        // ── THE ABYSS — void horror, final boss ───────────────
+        const vp = Math.sin(timestamp*0.002)*0.5+0.5;
+        // Multiple glow rings
+        ctx.globalAlpha = a * 0.12 * vp;
+        const ga1 = ctx.createRadialGradient(sx+8,sy2+8,0,sx+8,sy2+8,30);
+        ga1.addColorStop(0,'#aa00ff'); ga1.addColorStop(1,'transparent');
+        ctx.fillStyle=ga1; ctx.fillRect(sx-22,sy2-22,60,60);
+        ctx.globalAlpha = a * 0.08 * (1-vp);
+        const ga2 = ctx.createRadialGradient(sx+8,sy2+8,4,sx+8,sy2+8,28);
+        ga2.addColorStop(0,'#4400aa'); ga2.addColorStop(1,'transparent');
+        ctx.fillStyle=ga2; ctx.fillRect(sx-20,sy2-20,56,56);
+        ctx.globalAlpha = a;
+        // Void core — pulsing dark mass
+        ctx.fillStyle=`rgba(${hexToRgb(def.color)},${a})`;
+        ctx.fillRect(bx+2,by+2,sz-4,sz-4);
+        ctx.fillRect(bx,by+4,sz,sz-8);
+        ctx.fillRect(bx+4,by,sz-8,sz);
+        // Void texture — lighter purple swirl patches
+        ctx.fillStyle=`rgba(80,0,140,${a*0.9})`;
+        ctx.fillRect(bx+3,by+3,sz-6,sz-6);
+        ctx.fillStyle=`rgba(100,0,180,${a*vp})`;
+        ctx.fillRect(bx+5,by+5,sz-10,sz-10);
+        // Orbiting void tendrils
+        const angle1 = timestamp*0.004;
+        const tx1 = sx+8+Math.cos(angle1)*10, ty1 = sy2+8+Math.sin(angle1)*10;
+        const tx2 = sx+8+Math.cos(angle1+Math.PI)*10, ty2 = sy2+8+Math.sin(angle1+Math.PI)*10;
+        ctx.fillStyle=`rgba(160,0,255,${a*0.7})`;
+        ctx.fillRect(tx1-2,ty1-2,4,4); ctx.fillRect(tx2-2,ty2-2,4,4);
+        // Second orbit
+        const angle2 = timestamp*0.003+1;
+        const tx3=sx+8+Math.cos(angle2)*14, ty3=sy2+8+Math.sin(angle2)*14;
+        ctx.fillStyle=`rgba(80,0,200,${a*0.5})`;
+        ctx.fillRect(tx3-1,ty3-1,3,3);
+        // Eyes — three, irregular
+        ctx.fillStyle=`rgba(200,100,255,${a*pulse})`;
+        ctx.fillRect(bx+3,by+4,3,3); ctx.fillRect(bx+sz-6,by+4,3,3); ctx.fillRect(bx+sz/2-1,by+sz-6,3,3);
+        ctx.fillStyle=`rgba(255,200,255,${a*pulse*0.8})`;
+        ctx.fillRect(bx+4,by+5,1,1); ctx.fillRect(bx+sz-5,by+5,1,1); ctx.fillRect(bx+sz/2,by+sz-5,1,1);
+        // Void mouth — jagged
+        ctx.fillStyle=`rgba(0,0,0,${a})`;
+        ctx.fillRect(bx+4,by+sz-5,sz-8,2);
+        ctx.fillRect(bx+5,by+sz-4,2,2); ctx.fillRect(bx+sz-7,by+sz-4,2,2);
+        ctx.fillStyle=`rgba(160,0,255,${a*vp*0.6})`;
+        ctx.fillRect(bx+5,by+sz-4,sz-10,1);
+      }
+      ctx.restore();
     }
     const barW2 = sz + 4;
     const hpFrac = e.hp / e.maxHp;
@@ -5564,9 +5894,51 @@ function drawLoreTabControls(x, cy, w) {
   cy += 4;
 
   cy = lSec('LORE MENU', '#888888', x, cy);
-  kRow('A / D  or  ◄ ►',  'Switch tab');
+  kRow('A / D  or  \u25c4 \u25ba',  'Switch tab');
   kRow('SCROLL WHEEL',     'Scroll content up / down');
   kRow('ESC',              'Close menu');
+
+  // Mobile section
+  if (typeof isMobile !== 'undefined' && isMobile) {
+    cy += 8;
+    cy = lSec('TOUCH  (mobile)', '#44bb88', x, cy);
+
+    const tRows = [
+      ['LEFT SIDE DRAG',  'Move in drag direction',  ''],
+      ['TAP  (right)',    'Attack',                  ''],
+      ['SWIPE RIGHT',     'Dash',                    'in facing direction'],
+      ['SWIPE LEFT',      'Parry',                   '280ms block window'],
+      ['SWIPE UP',        'Ground pound',            'shockwave all dirs'],
+      ['SWIPE DOWN',      'Throw bomb',              'buy from shop first'],
+    ];
+    for (const [key, desc, note] of tRows) {
+      ctx.font = '6px "Press Start 2P"'; ctx.fillStyle = '#ffcc44';
+      ctx.fillText(key, x + 6, cy);
+      ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#997755';
+      ctx.fillText(desc, x + 180, cy);
+      if (note) {
+        cy += 11;
+        ctx.font = '4px "Press Start 2P"'; ctx.fillStyle = '#554433';
+        ctx.fillText(note, x + 180, cy);
+      }
+      cy += 13;
+    }
+    cy += 4;
+    cy = lSec('CORNER BUTTONS', '#44bb88', x, cy);
+    const cRows = [
+      ['top-left',   'Lore menu'],
+      ['top-right',  'Shop'],
+      ['btm-left',   'Inventory'],
+      ['btm-right',  'Mute / unmute'],
+    ];
+    for (const [pos, desc] of cRows) {
+      ctx.font = '6px "Press Start 2P"'; ctx.fillStyle = '#aa8844';
+      ctx.fillText(pos, x + 6, cy);
+      ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#997755';
+      ctx.fillText(desc, x + 150, cy);
+      cy += 13;
+    }
+  }
 }
 
 function drawLoreTabCombat(x, cy, w) {
@@ -5959,6 +6331,92 @@ function drawQuitConfirm() {
   ctx.fillText('ENTER  \u2014  yes, return to menu', W/2, py + 80);
   ctx.fillStyle = '#446644';
   ctx.fillText('ESC  \u2014  no, keep going', W/2, py + 100);
+
+  ctx.textAlign = 'left';
+  ctx.restore();
+}
+
+function drawBossHealthBar(timestamp) {
+  // Find active boss
+  const boss = enemies.find(e => e.type === 'boss' && e.hp > 0);
+  if (!boss) return;
+
+  const pct    = boss.hp / boss.maxHp;
+  const enrage = pct <= 0.25;
+  const phase2 = pct <= 0.50;
+  const shielded = boss._shieldActive;
+
+  const bw = 320, bh = 14;
+  const bx = (W - bw) / 2, by = 14;
+
+  // Corrupted flicker in enrage
+  const flicker = enrage && Math.floor(timestamp / 80) % 3 === 0;
+
+  // Shadow
+  ctx.save();
+  ctx.globalAlpha = 0.7;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(bx - 2, by - 2, bw + 4, bh + 22);
+  ctx.globalAlpha = 1;
+
+  // Bar background
+  ctx.fillStyle = '#1a0a0a';
+  ctx.fillRect(bx, by, bw, bh);
+
+  // Bar fill
+  let barColor;
+  if (shielded)    barColor = '#8888aa';
+  else if (enrage) barColor = flicker ? '#dd00ff' : '#aa00cc';
+  else if (phase2) barColor = '#ff4400';
+  else             barColor = boss.def.color || '#ff6600';
+
+  const fillW = Math.floor(bw * pct);
+  ctx.fillStyle = barColor;
+  ctx.fillRect(bx, by, fillW, bh);
+
+  // Enrage: corrupted segments overlay
+  if (enrage && !shielded) {
+    ctx.globalAlpha = 0.4;
+    for (let i = 0; i < 8; i++) {
+      const segX = bx + Math.floor(Math.sin(timestamp * 0.003 + i) * fillW * 0.5 + fillW * 0.5);
+      const segW = 4 + Math.floor(Math.sin(timestamp * 0.007 + i * 2) * 8);
+      ctx.fillStyle = i % 2 === 0 ? '#ff00ff' : '#000';
+      ctx.fillRect(Math.min(segX, bx + fillW - 2), by, Math.min(segW, 6), bh);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Phase 2 divider line at 50%
+  ctx.fillStyle = '#ffffff33';
+  ctx.fillRect(bx + Math.floor(bw * 0.5), by, 1, bh);
+
+  // Border
+  ctx.strokeStyle = enrage ? '#aa00cc' : '#333';
+  ctx.lineWidth   = enrage ? 2 : 1;
+  ctx.strokeRect(bx, by, bw, bh);
+
+  // Boss name
+  ctx.font = '6px "Press Start 2P"';
+  ctx.textAlign = 'center';
+  if (shielded) {
+    ctx.fillStyle = '#aaaacc';
+    ctx.fillText('\u26e8 SHIELDED \u26e8', W/2, by + bh + 10);
+  } else if (enrage) {
+    ctx.fillStyle = flicker ? '#ff00ff' : '#cc00ff';
+    ctx.fillText('\u2620 ' + boss.def.name.toUpperCase() + ' \u2620  ENRAGED', W/2, by + bh + 10);
+  } else {
+    ctx.fillStyle = boss.def.color || '#ffaa44';
+    ctx.fillText(boss.def.name.toUpperCase(), W/2, by + bh + 10);
+  }
+
+  // Charge telegraph
+  if (boss._chargeTelegraph > 0) {
+    const ct = boss._chargeTelegraph / 600;
+    ctx.globalAlpha = ct;
+    ctx.fillStyle = '#ff4400';
+    ctx.fillText('CHARGING...', W/2, by + bh + 22);
+    ctx.globalAlpha = 1;
+  }
 
   ctx.textAlign = 'left';
   ctx.restore();
@@ -7072,8 +7530,8 @@ function drawScene(timestamp) {
   drawGhost(timestamp);
   drawCursePopup(timestamp);
 
-  // Draw enemies
-  if (!ghost || !ghost.active) drawEnemies(timestamp);
+  // Draw enemies — always draw, ghost only hides non-boss enemies
+  drawEnemies(timestamp);
 
   // Draw attack arc + ground pound wave
   drawAttackArc(timestamp);
@@ -7291,6 +7749,7 @@ function drawScene(timestamp) {
   // Milestone banners
   drawBanners(timestamp);
   if (quitConfirm) drawQuitConfirm();
+  if (gameStarted && !isDead) drawBossHealthBar(timestamp);
 
   // Corpse compass
   drawCorpseCompass(timestamp);
@@ -9076,7 +9535,7 @@ function loop(timestamp) {
 
   if (!shopOpen && !loreOpen && !inventoryOpen && !merchantOpen && !boostOpen && !storyCutscene && !victoryScreen && gameMode !== 'easy') {
     checkStoryBossSpawn();
-    if (!ghost || !ghost.active) tickEnemies(dt, timestamp);
+    tickEnemies(dt, timestamp);
     tickGroundPound(dt);
     tickProjectiles(dt);
   }
@@ -9151,6 +9610,149 @@ player.py = player.wy * TILE;
 applyUpgrades(); // initialize all player stats from upgrades
 markVisible();
 requestAnimationFrame(loop);
+
+// ═══════════════════════════════════════════════════════════
+// MOBILE TOUCH CONTROLS
+// Only active on touch devices — zero effect on desktop
+// ═══════════════════════════════════════════════════════════
+const isMobile = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+
+if (isMobile) {
+  document.getElementById('mobile-controls').classList.add('active');
+  // Hide desktop hint text
+  const deskHint = document.getElementById('controls');
+  if (deskHint) deskHint.style.display = 'none';
+}
+
+// ── Gesture state ────────────────────────────────────────
+const _touch = {
+  // Left side: movement drag
+  leftId: null, leftStartX: 0, leftStartY: 0, leftX: 0, leftY: 0,
+  // Right side: action gestures
+  rightId: null, rightStartX: 0, rightStartY: 0,
+  // Held move direction injected into keys[]
+  moveDir: null,
+};
+
+const SWIPE_THRESH  = 18;  // px to register as directional swipe
+const MOVE_THRESH   = 12;  // px drag threshold for continuous move
+
+function _applyMoveDir(dir) {
+  // Clear all move keys then set one
+  keys['ArrowUp'] = keys['ArrowDown'] = keys['ArrowLeft'] = keys['ArrowRight'] = false;
+  if (dir === 'up')    keys['ArrowUp']    = true;
+  if (dir === 'down')  keys['ArrowDown']  = true;
+  if (dir === 'left')  keys['ArrowLeft']  = true;
+  if (dir === 'right') keys['ArrowRight'] = true;
+  _touch.moveDir = dir;
+}
+
+function _clearMoveKeys() {
+  keys['ArrowUp'] = keys['ArrowDown'] = keys['ArrowLeft'] = keys['ArrowRight'] = false;
+  _touch.moveDir = null;
+}
+
+// ── Left zone: continuous directional drag ───────────────
+const tzLeft = document.getElementById('tz-left');
+
+tzLeft.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.changedTouches[0];
+  _touch.leftId = t.identifier;
+  _touch.leftStartX = t.clientX; _touch.leftStartY = t.clientY;
+  _touch.leftX = t.clientX;      _touch.leftY = t.clientY;
+}, { passive: false });
+
+tzLeft.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier !== _touch.leftId) continue;
+    _touch.leftX = t.clientX; _touch.leftY = t.clientY;
+    const dx = _touch.leftX - _touch.leftStartX;
+    const dy = _touch.leftY - _touch.leftStartY;
+    if (Math.abs(dx) < MOVE_THRESH && Math.abs(dy) < MOVE_THRESH) { _clearMoveKeys(); return; }
+    if (Math.abs(dx) >= Math.abs(dy)) _applyMoveDir(dx > 0 ? 'right' : 'left');
+    else                               _applyMoveDir(dy > 0 ? 'down'  : 'up');
+  }
+}, { passive: false });
+
+tzLeft.addEventListener('touchend', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier === _touch.leftId) { _touch.leftId = null; _clearMoveKeys(); }
+  }
+}, { passive: false });
+
+// ── Right zone: tap = attack, swipe = ability ────────────
+const tzRight = document.getElementById('tz-right');
+
+tzRight.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.changedTouches[0];
+  _touch.rightId = t.identifier;
+  _touch.rightStartX = t.clientX; _touch.rightStartY = t.clientY;
+}, { passive: false });
+
+tzRight.addEventListener('touchend', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier !== _touch.rightId) continue;
+    _touch.rightId = null;
+    const dx = t.clientX - _touch.rightStartX;
+    const dy = t.clientY - _touch.rightStartY;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+
+    if (dist < SWIPE_THRESH) {
+      // Tap = attack
+      doAttack();
+    } else {
+      // Swipe direction = ability
+      if (Math.abs(dx) >= Math.abs(dy)) {
+        // Horizontal swipe
+        if (dx > 0) {
+          // Swipe right = dash (face right first)
+          player.faceDx = 1; player.faceDy = 0;
+          doDash();
+        } else {
+          // Swipe left = parry
+          doParry();
+        }
+      } else {
+        // Vertical swipe
+        if (dy < 0) {
+          // Swipe up = ground pound
+          doGroundPound();
+        } else {
+          // Swipe down = throw bomb
+          throwBomb();
+        }
+      }
+    }
+  }
+}, { passive: false });
+
+// ── Corner buttons ────────────────────────────────────────
+document.getElementById('mc-lore').addEventListener('touchend', e => {
+  e.preventDefault();
+  loreOpen = !loreOpen; shopOpen = false; inventoryOpen = false;
+});
+document.getElementById('mc-shop').addEventListener('touchend', e => {
+  e.preventDefault();
+  if (gameStarted && !isDead) {
+    shopOpen = !shopOpen; loreOpen = false; inventoryOpen = false;
+  }
+});
+document.getElementById('mc-inv').addEventListener('touchend', e => {
+  e.preventDefault();
+  inventoryOpen = !inventoryOpen; loreOpen = false; shopOpen = false;
+});
+document.getElementById('mc-mute').addEventListener('touchend', e => {
+  e.preventDefault();
+  SFX.toggleMute();
+  const btn = document.getElementById('mc-mute');
+  btn.innerHTML = SFX.enabled ? '&#x1F50A;' : '&#x1F507;';
+});
+
 </script>
 </body>
 </html>
