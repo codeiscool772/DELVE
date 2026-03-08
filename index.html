@@ -171,7 +171,7 @@
     <span id="hud-depth">DEPTH: 0</span>
   </div>
 </div>
-<div id="controls">WASD — MOVE &nbsp;|&nbsp; SHIFT — SPRINT &nbsp;|&nbsp; SPACE (hold=charge) — ATTACK &nbsp;|&nbsp; V — DASH &nbsp;|&nbsp; X — PARRY &nbsp;|&nbsp; F — POUND &nbsp;|&nbsp; G — BOMB &nbsp;|&nbsp; Q — BOW &nbsp;|&nbsp; 1/2/3 — WEAPON &nbsp;|&nbsp; I — INVENTORY &nbsp;|&nbsp; Z — BOOSTS &nbsp;|&nbsp; E — SHOP &nbsp;|&nbsp; ? — HELP</div>
+<div id="controls">WASD — MOVE &nbsp;|&nbsp; SHIFT — SPRINT &nbsp;|&nbsp; SPACE (hold=charge) — ATTACK &nbsp;|&nbsp; V — DASH &nbsp;|&nbsp; F — POUND &nbsp;|&nbsp; G — BOMB &nbsp;|&nbsp; Q — BOW &nbsp;|&nbsp; 1/2/3 — WEAPON &nbsp;|&nbsp; I — INVENTORY &nbsp;|&nbsp; Z — BOOSTS &nbsp;|&nbsp; E — SHOP &nbsp;|&nbsp; ? — HELP</div>
 
 <script>
 const TILE = 16;
@@ -726,6 +726,7 @@ function trackKill(enemyType) {
 }
 function trackSecretRoom() { META.achievements.secretRoomsFound++; checkAchievements(); }
 function endRunMeta(stats) {
+  if (gameMode === 'playground') return 0; // no records in playground
   META.achievements.totalRuns++;
   META.achievements.totalGold += stats.gold||0;
   META.achievements.deepestDepth = Math.max(META.achievements.deepestDepth, stats.depth||0);
@@ -1604,10 +1605,15 @@ function mulberry32(seed) {
 
 // ─── Noise (value noise) ────────────────────────────────────
 const noiseCache = new Map();
+let _pgWorldSeed = 0; // set by applyPlaygroundSeed() when playground mode starts
+
 function getRng(cx, cy) {
   const key = `${cx},${cy}`;
   if (!noiseCache.has(key)) {
-    noiseCache.set(key, mulberry32((cx * 73856093) ^ (cy * 19349663) ^ 0xDEADBEEF));
+    const seedBase = (typeof gameMode !== 'undefined' && gameMode === 'playground' && _pgWorldSeed)
+      ? _pgWorldSeed
+      : 0xDEADBEEF;
+    noiseCache.set(key, mulberry32((cx * 73856093) ^ (cy * 19349663) ^ seedBase));
   }
   return noiseCache.get(key);
 }
@@ -2347,6 +2353,8 @@ const collected = new Set(); // "cx,cy,lx,ly" keys for picked-up items
 let gold = 0;
 let totalCollected = 0;
 const floatingTexts = []; // {x, y, text, color, life, maxLife}
+const particles = [];     // {px,py, vx,vy, life,maxLife, color, size}
+const afterimages = [];   // {px,py, life,maxLife}
 
 const COIN_VALUE = 10;
 const GEM_VALUES = { ruby: 150, emerald: 200, sapphire: 175 };
@@ -2364,6 +2372,14 @@ let deathTimestamp = 0;
 let gameStarted = false;   // false = show start menu
 let gameMode = 'combat';   // 'easy' | 'combat' | 'hardcore' | 'story'
 let startMenuCursor = 1;   // 0=easy, 1=combat, 2=hardcore, 3=story
+// ── Run Modifiers ──────────────────────────────────────────────
+let modifierScreen = false;   // true = show modifier pick screen
+let activeModifiers = new Set(); // ids of chosen modifiers this run
+const MAX_MODIFIERS = 3;
+// ── Floor Events ───────────────────────────────────────────────
+let floorEvent = null;        // { id, chunksLeft, biome }
+let lastFloorBiome = null;    // track biome transitions
+let floorEventEchoBonus = 0;  // extra echoes from surviving floor events
 
 // Story mode state
 let storyAct = 0;           // 0=not started, 1-5 = current act
@@ -2506,6 +2522,8 @@ let corpse = null; // { wx, wy, gold, tiles, depth, oil } — set on death, clea
 
 // ─── Screenshake ─────────────────────────────────────────────
 let shakeAmt = 0, shakeDur = 0, shakeTimer = 0;
+let hitStopTimer = 0;
+function hitStop(ms) { hitStopTimer = ms; }
 function triggerShake(amount, duration) {
   shakeAmt = amount; shakeDur = duration; shakeTimer = duration;
 }
@@ -2576,11 +2594,67 @@ function spawnFloatText(wx, wy, text, color) {
   });
 }
 
+
+function spawnParticles(wx, wy, color, count, speed, lifeMs) {
+  for (let i = 0; i < count; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const spd = speed * (0.5 + Math.random() * 0.8);
+    particles.push({
+      px: wx * TILE + TILE/2 + (Math.random()-0.5)*6,
+      py: wy * TILE + TILE/2 + (Math.random()-0.5)*6,
+      vx: Math.cos(ang) * spd,
+      vy: Math.sin(ang) * spd,
+      life: lifeMs, maxLife: lifeMs,
+      color, size: 1.5 + Math.random() * 2
+    });
+  }
+}
+
+function tickParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.px += p.vx * dt * 0.06;
+    p.py += p.vy * dt * 0.06;
+    p.vy += 0.04 * dt * 0.06; // slight gravity
+    p.vx *= 0.96;
+    p.life -= dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+
+function drawAfterimages() {
+  ctx.save();
+  for (const a of afterimages) {
+    const alpha = (a.life / a.maxLife) * 0.45;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = '#4488ff';
+    // Simple player silhouette — just a rect
+    const sx = a.px - camX, sy = a.py - camY;
+    ctx.fillRect(sx + 3, sy + 2, 10, 13);
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+function drawParticles() {
+  ctx.save();
+  for (const p of particles) {
+    const alpha = Math.min(1, p.life / (p.maxLife * 0.4));
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = p.color;
+    const sx = p.px - camX, sy = p.py - camY;
+    ctx.fillRect(sx - p.size/2, sy - p.size/2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
 function tryCollect(wx, wy) {
   // Corpse recovery — step on it to reclaim everything
   if (corpse && wx === corpse.wx && wy === corpse.wy) {
     gold += corpse.gold;
-    oil = Math.min(maxOil(), oil + corpse.oil * 0.5);
+    gainOil(corpse.oil * 0.5);
     // Restore upgrades (take the higher of current vs corpse level)
     if (corpse.upgradeLevels) {
       corpse.upgradeLevels.forEach((lvl, i) => {
@@ -2616,7 +2690,7 @@ function tryCollect(wx, wy) {
 
     if (obj.type === 'coin') {
       collected.add(colKey + obj.type);
-      const goldMult = (player.goldMultiTimer||0) > 0 ? 3 : 1;
+      const goldMult = ((player.goldMultiTimer||0) > 0 ? 3 : 1) * (hasMod('gold_curse') ? 2 : 1);
       const coinVal = (gameMode === 'hardcore' ? COIN_VALUE * 4 : gameMode === 'combat' ? COIN_VALUE * 2 : COIN_VALUE) * goldMult;
       gold += coinVal; totalCollected++;
       SFX.play('coin');
@@ -2641,11 +2715,11 @@ function tryCollect(wx, wy) {
     } else if (obj.type === 'oil_flask') {
       collected.add(colKey + obj.type);
       const restore = OIL_FLASK_VALUE;
-      oil = Math.min(maxOil(), oil + restore);
+      gainOil(restore);
       if (hasCurse('starving')) {
         spawnFloatText(wx, wy, 'STARVING!', '#ff4400');
       } else {
-        oil = Math.min(maxOil(), oil + restore);
+        gainOil(restore);
         SFX.play('oil_flask');
         spawnFloatText(wx, wy, `+${restore}% OIL`, '#ff9900');
       }
@@ -2660,7 +2734,7 @@ function tryCollect(wx, wy) {
     } else if (obj.type === 'shrine' && !obj.used) {
       obj.used = true;
       collected.add(colKey + obj.type);
-      oil = Math.min(maxOil(), oil + 50);
+      gainOil(50);
       SFX.play('shrine');
       spawnFloatText(wx, wy, 'SHRINE! +50% OIL', '#cc88ff');
       triggerFlash('#aa44ff44', 500);
@@ -2847,7 +2921,8 @@ function spawnEnemiesForChunk(cx, cy) {
 
   const numEnemies = 1 + Math.floor(rng() * 2) + Math.floor(depth / 20);
   for (let i = 0; i < Math.min(numEnemies, 4); i++) {
-    const spawnThresh = gameMode === 'hardcore' ? 0.25 : gameMode === 'story' ? 0.5 : 0.6;
+    const _hordeNight = (floorEvent && floorEvent.id === 'horde_night') ? 0.20 : 1.0;
+    const spawnThresh = gameMode === 'hardcore' ? 0.25 : gameMode === 'story' ? 0.5 : hasMod('horde') ? 0.35 : Math.min(0.6, 0.6 * _hordeNight);
     if (rng() > spawnThresh) continue;
     const pick = validTypes[Math.floor(rng() * validTypes.length)];
     // Place in a floor tile away from player start
@@ -2875,8 +2950,10 @@ function tickEnemies(dt, timestamp) {
   // Spawn enemies for visible chunks
   const pcx = Math.floor(player.wx/CHUNK), pcy = Math.floor(player.wy/CHUNK);
   for (let dy = -2; dy <= 2; dy++)
-    for (let dx = -2; dx <= 2; dx++)
+    for (let dx = -2; dx <= 2; dx++) {
       spawnEnemiesForChunk(pcx+dx, pcy+dy);
+      rollRandomEvent(pcx+dx, pcy+dy);
+    }
 
   // Remove enemies too far away
   for (let i = enemies.length-1; i >= 0; i--) {
@@ -2887,9 +2964,11 @@ function tickEnemies(dt, timestamp) {
       // Drop gold
       gold += e.def.reward;
       SFX.play(e.type === 'boss' ? 'boss_die' : 'enemy_die');
+      spawnParticles(e.wx, e.wy, e.def.color || '#ffffff', e.type === 'boss' ? 24 : 8, e.type === 'boss' ? 3.0 : 1.8, e.type === 'boss' ? 600 : 300);
+      if (e.type !== 'boss') triggerShake(3, 150);
       _runKills++;
       trackKill(e.type);
-      if (hasCurse('starving')) oil = Math.min(maxOil(), oil + 5);
+      if (hasCurse('starving')) gainOil(5);
       spawnFloatText(e.wx, e.wy, `+${e.def.reward}g`, '#ffdd44');
       if (e.type === 'boss') {
         triggerFlash('#ff440044', 800);
@@ -2933,13 +3012,22 @@ function tickEnemies(dt, timestamp) {
     }
 
     // Tick hit flash
-    if (e.hitFlash > 0) e.hitFlash -= dt;
+    if (e.hitFlash > 0) { e.hitFlash -= dt; e._aggroed = true; }
+    if (e._stunTimer > 0) {
+      e._stunTimer -= dt;
+      if (e._stunTimer <= 0) spawnFloatText(e.wx, e.wy, '!', '#ffdd44');
+    }
 
     // AI: move toward player if in range
     const edx = player.wx - e.wx, edy = player.wy - e.wy;
     const distTiles = Math.sqrt(edx*edx+edy*edy);
     const range = e.def.range || 8;
+    if (e._stunTimer > 0) { /* stunned — skip movement */ }
+    else
     if (distTiles < range) {
+      // Pacifist modifier: enemies only chase if they've been attacked
+      if (hasMod('pacifist') && !e._aggroed) { e.moveTimer = e.def.moveInterval; }
+      else
       e.moveTimer -= dt;
       if (e.moveTimer <= 0) {
         let interval = gameMode === 'hardcore' ? Math.floor(e.def.moveInterval / 1.5) : e.def.moveInterval;
@@ -2948,9 +3036,100 @@ function tickEnemies(dt, timestamp) {
           if (sLit < 0.2) interval = Math.floor(interval * 0.55); // much faster in dark
         }
         e.moveTimer = interval;
+
+        // ── AI PERSONALITY ───────────────────────────────────
+        // Each enemy has a behaviour mode that switches periodically.
+        // Bosses always use direct mode.
+        if (!e._aiMode || e._aiTimer <= 0) {
+          if (e.type === 'boss' || e.isStoryBoss) {
+            e._aiMode = 'direct';
+            e._aiTimer = 99999;
+          } else {
+            const roll = Math.random();
+            if (roll < 0.35)      e._aiMode = 'direct';   // beeline
+            else if (roll < 0.60) e._aiMode = 'zigzag';   // alternate axes
+            else if (roll < 0.80) e._aiMode = 'flank';    // approach perpendicularly first
+            else                  e._aiMode = 'wander';   // random drift, still net-positive
+            // Mode lasts 3–8 moves
+            e._aiTimer = 3 + Math.floor(Math.random() * 6);
+            e._zigAxis = Math.random() < 0.5 ? 'x' : 'y'; // for zigzag
+            // Flank: pick a perpendicular direction to approach from
+            if (e._aiMode === 'flank') {
+              e._flankDx = Math.abs(edx) < Math.abs(edy) ? (Math.random()<0.5?1:-1) : 0;
+              e._flankDy = Math.abs(edx) >= Math.abs(edy) ? (Math.random()<0.5?1:-1) : 0;
+            }
+          }
+        }
+        e._aiTimer--;
+
         let mx = 0, my = 0;
-        if (Math.abs(edx) >= Math.abs(edy)) mx = edx > 0 ? 1 : -1;
-        else my = edy > 0 ? 1 : -1;
+
+        if (e._aiMode === 'direct') {
+          // Pure beeline — favour the larger axis
+          if (Math.abs(edx) >= Math.abs(edy)) mx = edx > 0 ? 1 : -1;
+          else my = edy > 0 ? 1 : -1;
+
+        } else if (e._aiMode === 'zigzag') {
+          // Alternate between x and y axis each move
+          e._zigAxis = e._zigAxis === 'x' ? 'y' : 'x';
+          if (e._zigAxis === 'x' && edx !== 0) mx = edx > 0 ? 1 : -1;
+          else if (e._zigAxis === 'y' && edy !== 0) my = edy > 0 ? 1 : -1;
+          else if (edx !== 0) mx = edx > 0 ? 1 : -1;
+          else if (edy !== 0) my = edy > 0 ? 1 : -1;
+
+        } else if (e._aiMode === 'flank') {
+          // Move perpendicular to close-in axis, then switch to direct when adjacent
+          if (distTiles > 3 && (e._flankDx !== 0 || e._flankDy !== 0)) {
+            mx = e._flankDx; my = e._flankDy;
+          } else {
+            // Close enough — go direct
+            if (Math.abs(edx) >= Math.abs(edy)) mx = edx > 0 ? 1 : -1;
+            else my = edy > 0 ? 1 : -1;
+          }
+
+        } else if (e._aiMode === 'wander') {
+          // Mostly random but biased toward player
+          const roll2 = Math.random();
+          if (roll2 < 0.45) {
+            // Bias toward player
+            if (Math.abs(edx) >= Math.abs(edy)) mx = edx > 0 ? 1 : -1;
+            else my = edy > 0 ? 1 : -1;
+          } else {
+            // Random cardinal
+            const rDirs = [[1,0],[-1,0],[0,1],[0,-1]];
+            const [rdx,rdy] = rDirs[Math.floor(Math.random()*4)];
+            mx = rdx; my = rdy;
+          }
+        }
+
+        // ── WALL SLIDE: if preferred direction is blocked, try alternatives ──
+        // This also makes enemies navigate around corners naturally
+        const _pref = {mx, my};
+        const _blocked = (dx, dy) => {
+          const tx = e.wx+dx, ty = e.wy+dy;
+          const t = getTile(tx,ty);
+          return t === T.WALL || t === T.SECRET_WALL || enemies.some(o=>o!==e&&o.wx===tx&&o.wy===ty);
+        };
+        if (_blocked(mx, my) && (mx !== 0 || my !== 0)) {
+          // Try the perpendicular axis
+          if (mx !== 0 && !_blocked(0, edy > 0 ? 1 : edy < 0 ? -1 : 0)) {
+            mx = 0; my = edy > 0 ? 1 : edy < 0 ? -1 : 0;
+          } else if (my !== 0 && !_blocked(edx > 0 ? 1 : edx < 0 ? -1 : 0, 0)) {
+            mx = edx > 0 ? 1 : edx < 0 ? -1 : 0; my = 0;
+          } else {
+            // Try all four directions ranked by distance-to-player improvement
+            const allDirs = [[1,0],[-1,0],[0,1],[0,-1]];
+            const ranked = allDirs
+              .filter(([dx,dy]) => !_blocked(dx,dy))
+              .sort(([ax,ay],[bx,by]) => {
+                const da = Math.abs(edx-ax)+Math.abs(edy-ay);
+                const db = Math.abs(edx-bx)+Math.abs(edy-by);
+                return da - db;
+              });
+            if (ranked.length > 0) { mx = ranked[0][0]; my = ranked[0][1]; }
+            else { mx = 0; my = 0; }
+          }
+        }
 
         // ── SHADOW: teleport adjacent to player if far + dark ──
         if (e.type === 'shadow' && distTiles > 4) {
@@ -3010,6 +3189,93 @@ function tickEnemies(dt, timestamp) {
           const sch=getChunk(scx2,scy2);
           if (sch.tiles[sly2*CHUNK+slx2]===T.FLOOR) sch.tiles[sly2*CHUNK+slx2]=T.ICE_PATCH;
         }
+
+        // ── NEW ATTACKS (gated in playground) ──
+        if (gameMode !== 'playground' || pgCfg.newAttacks) {
+        // ── SLIME: lunge charge every ~5 moves when 2-4 tiles away ──
+        if (e.type === 'slime' && !e.isMini && distTiles >= 2 && distTiles <= 4) {
+          e._lungeTimer = (e._lungeTimer || 0) + 1;
+          if (e._lungeTimer >= 5) {
+            e._lungeTimer = 0;
+            for (let ls = 0; ls < 2; ls++) {
+              const lnx = e.wx + (edx > 0 ? 1 : edx < 0 ? -1 : 0);
+              const lny = e.wy + (edy > 0 ? 1 : edy < 0 ? -1 : 0);
+              if (isWalkable(lnx,lny) && !enemies.some(o=>o!==e&&o.wx===lnx&&o.wy===lny)) {
+                e.wx=lnx; e.wy=lny;
+              }
+            }
+            spawnParticles(e.wx, e.wy, '#44cc44', 6, 0.06, 220);
+            spawnFloatText(e.wx, e.wy-1, 'LUNGE!', '#44cc44');
+            SFX.play('step_lava');
+          }
+        }
+
+        // ── SKELETON: raise shield blocking frontal hits for 1.5s ──
+        if (e.type === 'skeleton' && distTiles >= 1 && distTiles <= 4) {
+          e._shieldCd2 = (e._shieldCd2 || 4000) - interval;
+          if (e._shieldCd2 <= 0 && !e._skShield) {
+            e._skShield = true;
+            e._skShieldTimer = 1500;
+            e._skFacing = edx > 0 ? 1 : -1;
+            e._shieldCd2 = 5000 + Math.random() * 2000;
+            spawnFloatText(e.wx, e.wy-1, 'BLOCK!', '#ccbbaa');
+          }
+        }
+        if (e._skShield) {
+          e._skShieldTimer -= dt;
+          if (e._skShieldTimer <= 0) {
+            e._skShield = false;
+            spawnFloatText(e.wx, e.wy, 'OPEN!', '#ffdd44');
+          }
+        }
+
+        // ── SHADOW: fear pulse every ~6 moves in dark ──
+        if (e.type === 'shadow') {
+          const _sLitFear = litMap ? (litMap.get(`${e.wx},${e.wy}`) || 0) : 0;
+          if (_sLitFear < 0.2) {
+            e._fearCount = (e._fearCount || 0) + 1;
+            if (e._fearCount >= 6 && distTiles <= 5) {
+              e._fearCount = 0;
+              player.darkPatchTimer = Math.max(player.darkPatchTimer, 800);
+              spawnParticles(e.wx, e.wy, '#6644aa', 8, 0.05, 300);
+              spawnFloatText(e.wx, e.wy-1, 'FEAR!', '#6644aa');
+              SFX.play('shadow_teleport');
+            }
+          }
+        }
+
+        // ── WRAITH: oil burst at <40% HP — once ──
+        if (e.type === 'wraith' && !e._oilBurst && e.hp / e.maxHp < 0.4) {
+          e._oilBurst = true;
+          if (distTiles <= 3 && !player.wraithWard) {
+            const _burst = 15 + Math.floor(Math.random() * 10);
+            oil = Math.max(0, oil - _burst);
+            spawnParticles(e.wx, e.wy, '#4488ff', 12, 0.08, 400);
+            spawnFloatText(e.wx, e.wy-1, '-'+_burst+' OIL!', '#4488ff');
+            triggerFlash('#4488ff22', 400);
+            SFX.play('wraith_drain');
+          }
+        }
+
+        // ── LAVA GOLEM: slam when adjacent — scorches player's tile ──
+        if (e.type === 'lava_golem' && distTiles <= 1.5) {
+          e._slamCd = (e._slamCd || 3500) - interval;
+          if (e._slamCd <= 0) {
+            e._slamCd = 3500;
+            const _pcx2=Math.floor(player.wx/CHUNK), _pcy2=Math.floor(player.wy/CHUNK);
+            const _pch2=getChunk(_pcx2,_pcy2);
+            const _plx2=((player.wx%CHUNK)+CHUNK)%CHUNK, _ply2=((player.wy%CHUNK)+CHUNK)%CHUNK;
+            if (!player.lavaBoots && _pch2.tiles[_ply2*CHUNK+_plx2]===T.FLOOR) {
+              _pch2.tiles[_ply2*CHUNK+_plx2]=T.LAVA;
+              spawnParticles(player.wx, player.wy, '#ff4400', 10, 0.07, 350);
+              spawnFloatText(e.wx, e.wy-1, 'SLAM!', '#ff4400');
+              triggerShake(4, 300);
+              SFX.play('step_lava');
+            }
+          }
+        }
+        } // end new attacks gate
+
         // ── BOSS SPECIAL ATTACKS (story only) ──────────────
         if (e.isStoryBoss) {
           const _hpPct = e.hp / e.maxHp;
@@ -3187,23 +3453,57 @@ function tickEnemies(dt, timestamp) {
 
         // Damage player on contact
         if (e.wx === player.wx && e.wy === player.wy && player.invincible <= 0) {
-          // Parry check — reflect damage back
-          if (player.parryWindow > 0) {
-            e.hp -= e.def.dmg * 3;
-            e.hitFlash = 500;
-            player.parryWindow = 0;
-            player.parryCooldown = 400; // shorter cooldown reward
-            applyKnockback(e, e.wx - player.wx >= 0 ? 1 : -1, e.wy - player.wy >= 0 ? 1 : -1, 2);
-            spawnFloatText(player.wx, player.wy, 'PARRIED! x3', '#00ffff');
-            triggerShake(3, 200);
-            triggerFlash('#00ffff22', 200);
+          // Parry check — directional + tiered timing
+          if ((PARRY_ENABLED||(gameMode==='playground'&&pgCfg.parry)) && player.parryWindow > 0) {
+            // Check if the attack is coming from the parry direction
+            const _attackDx = e.wx - player.wx, _attackDy = e.wy - player.wy;
+            const _pd = player.parryDir || { dx: player.faceDx||1, dy: 0 };
+            const _facing = (_pd.dx !== 0 && Math.sign(_attackDx) === Math.sign(_pd.dx))
+                         || (_pd.dy !== 0 && Math.sign(_attackDy) === Math.sign(_pd.dy))
+                         || (_attackDx === 0 && _attackDy === 0); // same tile = always parry
+            if (_facing) {
+              const _elapsed = player.parryWindowMax - player.parryWindow;
+              const _perfect = _elapsed < 150;
+              player.parryWindow = 0;
+              player.parryCooldown = 300; // fast follow-up reward
+              applyKnockback(e, _attackDx >= 0 ? 1 : -1, _attackDy >= 0 ? 1 : -1, _perfect ? 3 : 2);
+              if (_perfect) {
+                // Perfect parry — reflect 3x + stun
+                e.hp -= e.def.dmg * 3;
+                e.hitFlash = 800;
+                e._stunTimer = 1200;
+                spawnFloatText(player.wx, player.wy, '✦ PERFECT!', '#00ffff');
+                triggerShake(5, 300);
+                triggerFlash('#00ffff66', 250);
+                hitStop(100);
+                spawnParticles(player.wx, player.wy, '#00ffff', 18, 2.5, 400);
+                SFX.play('parry');
+              } else {
+                // Late parry — block only, no damage
+                spawnFloatText(player.wx, player.wy, 'BLOCKED', '#88ccff');
+                triggerShake(2, 120);
+                triggerFlash('#00ffff33', 150);
+                spawnParticles(player.wx, player.wy, '#88ccff', 8, 1.2, 250);
+                SFX.play('parry');
+              }
+            } else {
+              // Wrong direction — parry fails, take damage normally
+              player.parryWindow = 0;
+              player.parryCooldown = 500;
+              spawnFloatText(player.wx, player.wy, 'WRONG DIR!', '#ff6644');
+              let dmg = Math.max(1, e.def.dmg + (hasMod('dark_world')?1:0) - (player.cursedBlade ? Math.max(0,player.armor-1) : player.armor));
+              player.hp -= dmg;
+              player.invincible = 600;
+              spawnFloatText(player.wx, player.wy-1, `-${dmg}HP`, '#ff2222');
+              triggerShake(3, 180);
+            }
           } else if (player.voidCloaks > 0) {
             player.voidCloaks--;
             player.invincible = 600;
             spawnFloatText(player.wx, player.wy, `VOID CLOAK! (${player.voidCloaks} left)`, '#aa88ff');
             triggerFlash('#aa88ff22', 200);
           } else {
-            let dmg = Math.max(1, e.def.dmg - (player.cursedBlade ? Math.max(0,player.armor-1) : player.armor));
+            let dmg = Math.max(1, e.def.dmg + (hasMod('dark_world')?1:0) - (player.cursedBlade ? Math.max(0,player.armor-1) : player.armor));
             if (META.selectedClass === 'shade') {
               const _shadeLit = litMap ? (litMap.get(`${player.wx},${player.wy}`) || 0) : 0;
               if (_shadeLit > 0.4) dmg = Math.floor(dmg * 2);
@@ -3223,7 +3523,7 @@ function tickEnemies(dt, timestamp) {
               player.hp -= dmg; // extra hit
               spawnFloatText(player.wx, player.wy, 'FROZEN!', '#88ccff');
             }
-            if (player.hp <= 0) {
+            if (player.hp <= 0 && !(gameMode === 'playground' && pgCfg.godMode)) {
               if (!deathStats) deathStats = {};
               deathStats._pendingKiller = e.def.name || e.type;
               if (player._secondWind && !player._secondWindUsed) {
@@ -3562,7 +3862,9 @@ function doAttack() {
   // Cursed blade cost
   if (player.cursedBlade && player.hp > 1 && !hasSynergy('vampiric_curse')) { player.hp -= 1; }
   // Berserk boost
-  const dmgMulti = (player.boostDmgTimer || 0) > 0 ? 3 : 1;
+  const _critRoll = Math.random() < (player.critChance||0);
+  const dmgMulti = (player.boostDmgTimer || 0) > 0 ? 3 : _critRoll ? 2 : 1;
+  if (_critRoll) spawnFloatText(player.wx, player.wy-1, 'CRIT!', '#ffff44');
   player.attackCooldown = charged ? 0 : (player.attackCooldownMax || 300);
   player.attackDuration = charged ? 350 : 200;
 
@@ -3578,17 +3880,28 @@ function doAttack() {
       const ay = player.wy + dir.dy * r;
       for (const e of enemies) {
         if (e.wx === ax && e.wy === ay) {
+          // Skeleton shield: blocks if player attacks from the side the skeleton faces
+          if (e._skShield && (dir.dx === e._skFacing || (dir.dx === 0 && Math.abs(e._skFacing) > 0))) {
+            spawnFloatText(ax, ay, 'BLOCKED!', '#ccbbaa');
+            spawnParticles(ax, ay, '#ccbbaa', 4, 0.05, 180);
+            SFX.play('skeleton_bone');
+            hit = true;
+            continue;
+          }
           const kb = charged ? 2 : 1;
           applyKnockback(e, dir.dx, dir.dy, kb);
           e.hp -= dmg;
           e.hitFlash = 250;
           SFX.play(e.type === 'boss' ? 'boss_hurt' : 'enemy_hurt');
           spawnFloatText(ax, ay, `-${dmg}`, charged ? '#ff2200' : '#ff6644');
+          spawnParticles(ax, ay, e.def.color || '#ff6644', charged ? 10 : 5, charged ? 2.2 : 1.4, charged ? 350 : 220);
+          if (charged) { triggerShake(6, 280); triggerFlash('#ff220033', 120); }
+          else triggerShake(2, 90);
           hit = true;
         }
       }
     }
-    if (charged) { triggerShake(5, 250); triggerFlash('#ff220022', 200); }
+    if (charged) { triggerShake(5, 250); triggerFlash('#ff220022', 200); hitStop(80); }
 
   } else if (w === 'torch_weapon') {
     // Wide 3-tile arc perpendicular to facing
@@ -3622,15 +3935,23 @@ function doAttack() {
 
   if (hit) triggerShake(2, 120);
 
-  // Check if any sword attack hit a secret wall in facing direction
-  if (w === 'sword') {
+  // Any weapon can break secret walls — hardcore requires dungeon key
+  {
     const dir2 = { dx: player.faceDx || 1, dy: player.faceDy || 0 };
     const swx = player.wx + dir2.dx;
     const swy = player.wy + dir2.dy;
     const scx = Math.floor(swx/CHUNK), scy = Math.floor(swy/CHUNK);
     const slx = ((swx%CHUNK)+CHUNK)%CHUNK, sly = ((swy%CHUNK)+CHUNK)%CHUNK;
     if (getTile(swx, swy) === T.SECRET_WALL) {
-      breakSecretWall(scx, scy, slx, sly, swx, swy);
+      if (gameMode === 'hardcore') {
+        if (player.dungeonKey) {
+          breakSecretWall(scx, scy, slx, sly, swx, swy);
+        } else {
+          spawnFloatText(player.wx, player.wy, 'NEED DUNGEON KEY', '#ff4444');
+        }
+      } else {
+        breakSecretWall(scx, scy, slx, sly, swx, swy);
+      }
     }
   }
 }
@@ -3710,7 +4031,7 @@ function throwBomb() {
     px: player.px + 8 + dir.dx * 8, py: player.py + 8 + dir.dy * 8,
     dx: dir.dx, dy: dir.dy,
     speed: 0.10,
-    dmg: 4 + getUpgradeValue('bomb') * 2,
+    dmg: 4 + getUpgradeValue('bomb') * 2 + getUpgradeValue('bomb_dmg') * 2,
     type: 'bomb',
     life: 1200, maxLife: 1200,
     fuse: 900, // explodes after this ms
@@ -3730,11 +4051,18 @@ function doDash() {
   triggerFlash('#ffffff11', 120);
 }
 
+// ── EXPERIMENTAL: set PARRY_ENABLED = true to re-enable directional parry system ──
+const PARRY_ENABLED = false;
+
 function doParry() {
+  const _parryOn = PARRY_ENABLED || (gameMode === 'playground' && pgCfg.parry);
+  if (!_parryOn) return;
   if (player.parryCooldown > 0 || player.parryWindow > 0) return;
-  player.parryCooldown = 1200;
-  player.parryWindow = 280; // active parry window
-  spawnFloatText(player.wx, player.wy, 'PARRY!', '#88ffff');
+  player.parryCooldown = 2000;     // miss penalty
+  player.parryWindow = 400;        // total window
+  player.parryWindowMax = 400;     // for timing calc
+  player.parryDir = { dx: player.faceDx || 1, dy: player.faceDy || 0 };
+  SFX.play('parry');
 }
 
 function applyKnockback(e, dx, dy, tiles) {
@@ -3826,20 +4154,56 @@ function tickProjectiles(dt) {
     // Bone projectile — hits player
     if (p.type === 'bone') {
       if (wx2 === player.wx && wy2 === player.wy && player.invincible <= 0) {
-        if (player.parryWindow > 0) {
-          player.parryWindow = 0;
-          spawnFloatText(player.wx, player.wy, 'PARRIED!', '#00ffff');
+        if ((PARRY_ENABLED||(gameMode==='playground'&&pgCfg.parry)) && player.parryWindow > 0) {
+          // Directional check: bone coming from parry direction?
+          const _pd2 = player.parryDir || { dx: player.faceDx||1, dy: 0 };
+          const _boneFacing = (_pd2.dx !== 0 && Math.sign(p.dx) === Math.sign(_pd2.dx))
+                           || (_pd2.dy !== 0 && Math.sign(p.dy) === Math.sign(_pd2.dy));
+          if (_boneFacing) {
+            const _elapsed2 = player.parryWindowMax - player.parryWindow;
+            const _perfect2 = _elapsed2 < 150;
+            player.parryWindow = 0;
+            player.parryCooldown = 300;
+            // Deflect bone back toward enemies
+            projectiles.push({
+              wx: player.wx, wy: player.wy,
+              px: player.px + 8, py: player.py + 8,
+              dx: -p.dx, dy: -p.dy,
+              speed: p.speed * 1.5,
+              dmg: _perfect2 ? p.dmg * 3 : p.dmg * 2,
+              type: 'arrow', life: 900, maxLife: 900,
+              color: _perfect2 ? '#00ffff' : '#88ccff',
+              charged: _perfect2,
+            });
+            spawnParticles(player.wx, player.wy, _perfect2 ? '#00ffff' : '#88ccff', _perfect2 ? 14 : 8, 2.0, 300);
+            spawnFloatText(player.wx, player.wy, _perfect2 ? '✦ DEFLECT!' : 'DEFLECT', _perfect2 ? '#00ffff' : '#88ccff');
+            triggerFlash(_perfect2 ? '#00ffff55' : '#00ffff22', 200);
+            if (_perfect2) { hitStop(80); triggerShake(4, 200); }
+            SFX.play('parry');
+            projectiles.splice(i, 1);
+          } else {
+            // Wrong direction — bone hits
+            player.parryWindow = 0;
+            player.parryCooldown = 500;
+            const bdmg = Math.max(1, p.dmg - player.armor);
+            player.hp -= bdmg;
+            player.invincible = 800;
+            spawnFloatText(player.wx, player.wy, `-${bdmg}HP WRONG DIR`, '#ff2222');
+            triggerShake(2, 150);
+            projectiles.splice(i, 1);
+          }
         } else if (player.voidCloaks > 0) {
           player.voidCloaks--;
           spawnFloatText(player.wx, player.wy, 'VOID CLOAK!', '#aa88ff');
+          projectiles.splice(i, 1);
         } else {
           const bdmg = Math.max(1, p.dmg - player.armor);
           player.hp -= bdmg;
           player.invincible = 800;
           spawnFloatText(player.wx, player.wy, `-${bdmg}HP`, '#ff2222');
           triggerShake(2, 150);
+          projectiles.splice(i, 1);
         }
-        projectiles.splice(i, 1);
       }
       continue;
     }
@@ -3878,6 +4242,11 @@ function tickCombatPlayer(dt) {
 
   // Dash movement
   if (player.dashDuration > 0) {
+    // Spawn afterimage every 30ms
+    if (!player._lastAfterimage || Date.now() - player._lastAfterimage > 30) {
+      player._lastAfterimage = Date.now();
+      afterimages.push({ px: player.px, py: player.py, life: 180, maxLife: 180 });
+    }
     const steps = 2;
     for (let s = 0; s < steps; s++) {
       const nx = player.wx + player.dashDx;
@@ -3930,19 +4299,50 @@ function drawAttackArc(timestamp) {
     }
   }
 
-  // Parry window flash
-  if (player.parryWindow > 0) {
-    const pFrac = player.parryWindow / 280;
-    ctx.fillStyle = `rgba(100,220,255,${pFrac * 0.4})`;
-    ctx.fillRect(px - 6, py - 6, TILE + 12, TILE + 12);
-    ctx.strokeStyle = `rgba(100,220,255,${pFrac * 0.9})`;
-    ctx.lineWidth = 2;
-    ctx.strokeRect(px - 5, py - 5, TILE + 10, TILE + 10);
+  // Parry shield visual — directional (EXPERIMENTAL)
+  if ((PARRY_ENABLED||(gameMode==='playground'&&pgCfg.parry)) && player.parryWindow > 0) {
+    const pFrac = player.parryWindow / (player.parryWindowMax || 400);
+    const _perfect_zone = pFrac > (1 - 150/400); // first 150ms = perfect zone
+    const shieldColor = _perfect_zone ? `rgba(80,255,255,${0.5 + 0.3*Math.sin(Date.now()*0.025)})` : `rgba(80,180,255,${pFrac * 0.85})`;
+    const _pd = player.parryDir || { dx: 1, dy: 0 };
+    const cx2 = px + TILE/2, cy2 = py + TILE/2;
+    const shieldDist = TILE * 0.7;
+    const shieldW = TILE * 1.1;
+    const shieldH = TILE * 0.28;
+    ctx.save();
+    ctx.translate(cx2 + _pd.dx * shieldDist, cy2 + _pd.dy * shieldDist);
+    ctx.rotate(Math.atan2(_pd.dy, _pd.dx));
+    // Shield body
+    ctx.fillStyle = shieldColor.replace(/[\d.]+\)$/, `${pFrac * (_perfect_zone ? 0.35 : 0.22)})`);
+    ctx.beginPath();
+    ctx.roundRect(-shieldH/2, -shieldW/2, shieldH, shieldW, 4);
+    ctx.fill();
+    // Shield edge
+    ctx.strokeStyle = shieldColor;
+    ctx.lineWidth = _perfect_zone ? 3 : 2;
+    if (_perfect_zone) { ctx.shadowColor = '#00ffff'; ctx.shadowBlur = 10; }
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    // Shield cross detail
+    ctx.strokeStyle = shieldColor.replace(/[\d.]+\)$/, `${pFrac * 0.5})`);
     ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, -shieldW*0.3); ctx.lineTo(0, shieldW*0.3);
+    ctx.moveTo(-shieldH*0.4, 0); ctx.lineTo(shieldH*0.4, 0);
+    ctx.stroke();
+    ctx.restore();
+    // Subtle player tint
+    ctx.fillStyle = `rgba(80,200,255,${pFrac * 0.12})`;
+    ctx.fillRect(px, py, TILE, TILE);
   }
 
   // Dash trail
   if (player.dashDuration > 0) {
+    // Spawn afterimage every 30ms
+    if (!player._lastAfterimage || Date.now() - player._lastAfterimage > 30) {
+      player._lastAfterimage = Date.now();
+      afterimages.push({ px: player.px, py: player.py, life: 180, maxLife: 180 });
+    }
     const df = player.dashDuration / 180;
     ctx.fillStyle = `rgba(255,255,255,${df * 0.3})`;
     ctx.fillRect(px - player.dashDx * TILE * 0.5, py - player.dashDy * TILE * 0.5, TILE, TILE);
@@ -4174,6 +4574,8 @@ let shopOpen = false;
 let shopCursor = 0;
 let shopTab = 0; // 0=explore 1=weapons
 let inventoryOpen = false;
+let invTab = 0; // 0=weapons 1=buffs 2=status
+let buffCursor = 0;
 let invCursor = 0; // selected weapon slot index
 
 const upgrades = [
@@ -4299,6 +4701,52 @@ const upgrades = [
     tab: 'weapons',
     labels: ['SHORT BOW','LONG BOW','SHADOW BOW'],
   },
+  // ── New upgrades ──────────────────────────────────────────
+  {
+    id: 'crit',
+    name: 'KEEN EDGE',
+    desc: 'Chance to deal double damage on hit.',
+    baseCost: 380,
+    maxLevel: 3,
+    level: 0,
+    costMult: 2.2,
+    icon: '⚡',
+    labels: ['KEEN EDGE','RAZOR EDGE','VOID EDGE'],
+  },
+  {
+    id: 'oildrain',
+    name: 'OIL SAVER',
+    desc: 'Reduces passive oil drain per step.',
+    baseCost: 300,
+    maxLevel: 3,
+    level: 0,
+    costMult: 2.0,
+    icon: '💧',
+    labels: ['OIL SAVER','OIL SEAL','OIL MASTERY'],
+  },
+  {
+    id: 'bomb_dmg',
+    name: 'BLAST POWDER',
+    desc: 'Bombs deal more damage and have larger radius.',
+    baseCost: 350,
+    maxLevel: 3,
+    level: 0,
+    costMult: 2.2,
+    icon: '💣',
+    tab: 'weapons',
+    labels: ['BLAST POWDER','BLACK POWDER','VOID POWDER'],
+  },
+  {
+    id: 'regen',
+    name: 'IRON CONSTITUTION',
+    desc: 'Regenerate HP more frequently from walking.',
+    baseCost: 320,
+    maxLevel: 3,
+    level: 0,
+    costMult: 2.0,
+    icon: '❤',
+    labels: ['IRON CONSTITUTION','STONE SKIN','IMMORTAL FLESH'],
+  },
 ];
 
 // Bomb count (separate from upgrade level — buying adds bombs)
@@ -4308,12 +4756,36 @@ const projectiles = []; // { wx,wy, px,py, dx,dy, speed, dmg, type, life, maxLif
 
 function upgradeCost(upg) {
   const base = Math.floor(upg.baseCost * Math.pow(upg.costMult, upg.level));
-  return gameMode === 'hardcore' ? Math.floor(base * 0.6) : base;
+  let cost = gameMode === 'hardcore' ? Math.floor(base * 0.6) : base;
+  if (hasMod('oil_miser')) cost = Math.floor(cost * 0.5);
+  cost = Math.floor(cost * (floorEventSaleMult || 1.0));
+  if (hasMod('fragile') && upg.id === 'armor') cost = 0;
+  return cost;
 }
 
 function getUpgradeValue(id) {
   const upg = upgrades.find(u => u.id === id);
   return upg ? upg.level : 0;
+}
+
+function gainOil(amount) {
+  const before = oil;
+  const cap = maxOil();
+  oil = Math.min(cap, oil + amount);
+  const overflow = (before + amount) - cap;
+  if (overflow > 0) {
+    if (player.gildedFlask) {
+      const g = Math.floor(overflow / 1 * 2); // 2g per 1% overflow
+      if (g > 0) { gold += g; spawnFloatText(player.wx, player.wy - 1, '+' + g + 'g OIL', '#ffdd44'); }
+    }
+    if (player.vitalFlask) {
+      const h = Math.floor(overflow / 4); // 1HP per 4% overflow
+      if (h > 0 && player.hp < player.maxHp) {
+        player.hp = Math.min(player.maxHp, player.hp + h);
+        spawnFloatText(player.wx, player.wy, '+' + h + 'HP OIL', '#ff4488');
+      }
+    }
+  }
 }
 
 function maxOil() {
@@ -4451,155 +4923,528 @@ function drawWeaponSprite(ctx, id, cx, cy, col, lvl, t) {
 }
 
 function drawInventory(timestamp) {
-  const owned = getOwnedWeapons();
-  if (invCursor >= owned.length) invCursor = 0;
-
   // Backdrop
-  ctx.fillStyle = 'rgba(0,0,0,0.88)';
+  ctx.fillStyle = 'rgba(0,0,0,0.90)';
   ctx.fillRect(0, 0, W, H);
 
-  const iw = 520, ih = 400;
+  const iw = 560, ih = 420;
   const ix = (W - iw) / 2, iy = (H - ih) / 2;
 
   // Panel
-  ctx.fillStyle = '#080500';
+  ctx.fillStyle = '#06050a';
   ctx.fillRect(ix, iy, iw, ih);
   ctx.strokeStyle = '#cc8800'; ctx.lineWidth = 2;
   ctx.strokeRect(ix, iy, iw, ih);
   ctx.strokeStyle = '#331800'; ctx.lineWidth = 1;
-  ctx.strokeRect(ix + 4, iy + 4, iw - 8, ih - 8);
+  ctx.strokeRect(ix+4, iy+4, iw-8, ih-8);
 
-  // Title
-  ctx.font = '9px "Press Start 2P"';
-  ctx.fillStyle = '#cc8800';
+  // ── Tabs ─────────────────────────────────────────────────
+  const TABS = ['WEAPONS', 'BUFFS & ITEMS', 'STATUS'];
+  const tabW = Math.floor(iw / TABS.length);
+  TABS.forEach((t, i) => {
+    const tx = ix + i * tabW;
+    const active = invTab === i;
+    ctx.fillStyle = active ? '#1a0d00' : '#08050a';
+    ctx.fillRect(tx, iy, tabW, 28);
+    ctx.strokeStyle = active ? '#cc8800' : '#331800';
+    ctx.lineWidth = active ? 2 : 1;
+    ctx.strokeRect(tx, iy, tabW, 28);
+    ctx.font = '6px "Press Start 2P"';
+    ctx.fillStyle = active ? '#ffaa00' : '#554422';
+    ctx.textAlign = 'center';
+    ctx.fillText(t, tx + tabW/2, iy + 17);
+  });
+  ctx.textAlign = 'left';
+
+  // Divider below tabs
+  ctx.fillStyle = '#331800';
+  ctx.fillRect(ix, iy+28, iw, 1);
+
+  // ── Key hints ────────────────────────────────────────────
+  ctx.font = '5px "Press Start 2P"';
+  ctx.fillStyle = '#332200';
   ctx.textAlign = 'center';
-  ctx.fillText('INVENTORY', W / 2, iy + 26);
+  ctx.fillText('A/D: SWITCH TAB     I/ESC: CLOSE', W/2, iy + ih - 10);
+  ctx.textAlign = 'left';
+
+  const contentY = iy + 38;
+  const contentH = ih - 50;
+
+  if (invTab === 0) drawInvTabWeapons(ix, contentY, iw, contentH, timestamp);
+  if (invTab === 1) drawInvTabBuffs(ix, contentY, iw, contentH, timestamp);
+  if (invTab === 2) drawInvTabStatus(ix, contentY, iw, contentH, timestamp);
+}
+
+// ── Tab 0: Weapons (existing logic, extracted) ────────────
+function drawInvTabWeapons(ix, contentY, iw, contentH, timestamp) {
+  const owned = getOwnedWeapons();
+  if (invCursor >= owned.length) invCursor = 0;
 
   ctx.font = '5px "Press Start 2P"';
   ctx.fillStyle = '#443300';
-  ctx.fillText('A / D  SELECT     ENTER  EQUIP     I  CLOSE', W / 2, iy + 42);
+  ctx.textAlign = 'center';
+  ctx.fillText('A/D SELECT     ENTER EQUIP', W/2, contentY + 10);
   ctx.textAlign = 'left';
 
-  // Divider
-  ctx.fillStyle = '#221100';
-  ctx.fillRect(ix + 10, iy + 48, iw - 20, 1);
-
-  // Weapon slots
   const slotW = 120, slotH = 220;
-  const totalSlotW = owned.length * slotW + (owned.length - 1) * 12;
-  const startX = ix + iw / 2 - totalSlotW / 2;
-  const slotY = iy + 58;
+  const totalSlotW = owned.length * slotW + (owned.length-1)*12;
+  const startX = ix + iw/2 - totalSlotW/2;
+  const slotY = contentY + 20;
 
   owned.forEach((wpn, i) => {
-    const sx = startX + i * (slotW + 12);
+    const sx = startX + i*(slotW+12);
     const selected = i === invCursor;
-    const equipped = player.weapon === wpn.id;
-    const pulse = selected ? 0.6 + Math.sin(timestamp * 0.005) * 0.4 : 0;
+    const equipped  = player.weapon === wpn.id;
+    const pulse = selected ? 0.6 + Math.sin(timestamp*0.005)*0.4 : 0;
 
-    // Slot bg
     ctx.fillStyle = equipped ? '#1a0d00' : selected ? '#110800' : '#0a0500';
     ctx.fillRect(sx, slotY, slotW, slotH);
-
-    // Border
-    if (equipped) {
-      ctx.strokeStyle = wpn.color;
-      ctx.lineWidth = 2;
-      ctx.shadowColor = wpn.color;
-      ctx.shadowBlur = 8 * pulse;
-    } else if (selected) {
-      ctx.strokeStyle = '#664400';
-      ctx.lineWidth = 1;
-      ctx.shadowBlur = 0;
-    } else {
-      ctx.strokeStyle = '#221100';
-      ctx.lineWidth = 1;
-      ctx.shadowBlur = 0;
-    }
+    if (equipped) { ctx.strokeStyle=wpn.color; ctx.lineWidth=2; ctx.shadowColor=wpn.color; ctx.shadowBlur=8*pulse; }
+    else if (selected) { ctx.strokeStyle='#664400'; ctx.lineWidth=1; ctx.shadowBlur=0; }
+    else { ctx.strokeStyle='#221100'; ctx.lineWidth=1; ctx.shadowBlur=0; }
     ctx.strokeRect(sx, slotY, slotW, slotH);
-    ctx.shadowBlur = 0; ctx.lineWidth = 1;
+    ctx.shadowBlur=0; ctx.lineWidth=1;
 
-    // EQUIPPED badge
     if (equipped) {
-      ctx.fillStyle = wpn.color;
-      ctx.font = '5px "Press Start 2P"';
-      ctx.textAlign = 'center';
-      ctx.fillText('✦ EQUIPPED ✦', sx + slotW / 2, slotY + 12);
+      ctx.fillStyle=wpn.color; ctx.font='5px "Press Start 2P"'; ctx.textAlign='center';
+      ctx.fillText('✦ EQUIPPED ✦', sx+slotW/2, slotY+12);
     }
+    drawWeaponSprite(ctx, wpn.id, sx+slotW/2, slotY+(equipped?30:22), wpn.color, wpn.level, timestamp);
 
-    // Weapon sprite (centred in top half of slot)
-    const spriteY = slotY + (equipped ? 30 : 22);
-    drawWeaponSprite(ctx, wpn.id, sx + slotW / 2, spriteY, wpn.color, wpn.level, timestamp);
+    ctx.font='6px "Press Start 2P"'; ctx.fillStyle=selected||equipped?wpn.color:'#886644'; ctx.textAlign='center';
+    const nameY=slotY+130;
+    const words=wpn.label.split(' ');
+    if (words.length>1 && ctx.measureText(wpn.label).width>slotW-8) {
+      const mid=Math.ceil(words.length/2);
+      ctx.fillText(words.slice(0,mid).join(' '), sx+slotW/2, nameY);
+      ctx.fillText(words.slice(mid).join(' '), sx+slotW/2, nameY+12);
+    } else ctx.fillText(wpn.label, sx+slotW/2, nameY);
 
-    // Name
-    ctx.font = '6px "Press Start 2P"';
-    ctx.fillStyle = selected || equipped ? wpn.color : '#886644';
-    ctx.textAlign = 'center';
-    const nameY = slotY + 130;
-    // Word-wrap long names
-    const words = wpn.label.split(' ');
-    if (words.length > 1 && ctx.measureText(wpn.label).width > slotW - 8) {
-      const mid = Math.ceil(words.length / 2);
-      ctx.fillText(words.slice(0, mid).join(' '), sx + slotW / 2, nameY);
-      ctx.fillText(words.slice(mid).join(' '), sx + slotW / 2, nameY + 12);
-    } else {
-      ctx.fillText(wpn.label, sx + slotW / 2, nameY);
-    }
-
-    // Level pips
-    if (wpn.maxLevel > 0) {
-      const pipW = 10, pipGap = 4;
-      const totalPip = wpn.maxLevel * pipW + (wpn.maxLevel - 1) * pipGap;
-      const pipX = sx + slotW / 2 - totalPip / 2;
-      for (let p = 0; p < wpn.maxLevel; p++) {
-        ctx.fillStyle = p < wpn.level ? wpn.color : '#221100';
-        ctx.fillRect(pipX + p * (pipW + pipGap), slotY + 148, pipW, 4);
+    if (wpn.maxLevel>0) {
+      const pipW=10, pipGap=4;
+      const totalPip=wpn.maxLevel*pipW+(wpn.maxLevel-1)*pipGap;
+      const pipX=sx+slotW/2-totalPip/2;
+      for (let p=0;p<wpn.maxLevel;p++) {
+        ctx.fillStyle=p<wpn.level?wpn.color:'#221100';
+        ctx.fillRect(pipX+p*(pipW+pipGap), slotY+148, pipW, 4);
       }
     }
-
-    // Stats
-    ctx.font = '5px "Press Start 2P"';
-    ctx.textAlign = 'left';
-    const statX = sx + 6;
-    let statY = slotY + 162;
-    ctx.fillStyle = '#664433';
-    ctx.fillText('DMG: ' + wpn.dmg, statX, statY); statY += 11;
-    ctx.fillText('RNG: ' + wpn.range, statX, statY); statY += 11;
-
-    // Special (word-wrap to fit slot width)
-    ctx.fillStyle = '#443322';
-    const maxW = slotW - 12;
-    const specialWords = wpn.special.split(' ');
-    let line = '';
+    ctx.font='5px "Press Start 2P"'; ctx.textAlign='left';
+    const statX=sx+6; let statY=slotY+162;
+    ctx.fillStyle='#664433';
+    ctx.fillText('DMG: '+wpn.dmg, statX, statY); statY+=11;
+    ctx.fillText('RNG: '+wpn.range, statX, statY); statY+=11;
+    ctx.fillStyle='#443322';
+    const maxW=slotW-12; const specialWords=wpn.special.split(' ');
+    let line='';
     for (const word of specialWords) {
-      const test = line + (line ? ' ' : '') + word;
-      if (ctx.measureText(test).width > maxW && line) {
-        ctx.fillText(line, statX, statY); statY += 10;
-        line = word;
-      } else line = test;
+      const test=line+(line?' ':'')+word;
+      if (ctx.measureText(test).width>maxW&&line) { ctx.fillText(line,statX,statY); statY+=10; line=word; }
+      else line=test;
     }
-    if (line) ctx.fillText(line, statX, statY);
-
-    ctx.textAlign = 'left';
+    if (line) ctx.fillText(line,statX,statY);
+    ctx.textAlign='left';
   });
 
-  // Bottom hint — if nothing else owned, nudge player to shop
-  if (owned.length === 1) {
-    ctx.font = '5px "Press Start 2P"';
-    ctx.fillStyle = '#332200';
-    ctx.textAlign = 'center';
-    ctx.fillText('buy weapons at the shop [E] to unlock more slots', W / 2, iy + ih - 14);
-    ctx.textAlign = 'left';
+  if (owned.length===1) {
+    ctx.font='5px "Press Start 2P"'; ctx.fillStyle='#332200'; ctx.textAlign='center';
+    ctx.fillText('buy weapons at the shop to unlock more slots', W/2, contentY+contentH-20);
+    ctx.textAlign='left';
+  }
+}
+
+// ── Tab 1: Buffs & Items ──────────────────────────────────
+function drawInvTabBuffs(ix, contentY, iw, contentH, timestamp) {
+  const col1 = ix + 16, col2 = ix + iw/2 + 8;
+  let y1 = contentY + 6, y2 = contentY + 6;
+
+  function row(label, val, color, col, y) {
+    ctx.font = '6px "Press Start 2P"'; ctx.fillStyle = color;
+    ctx.fillText(label, col, y);
+    ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#554433';
+    ctx.fillText(val, col + 4, y + 11);
+    return y + 22;
   }
 
-  // Current weapon HUD hint at bottom
-  ctx.font = '6px "Press Start 2P"';
-  ctx.fillStyle = '#554422';
-  ctx.textAlign = 'center';
-  ctx.fillText('quick-swap: 1 = SWORD   2 = TORCH   3 = BOW', W / 2, iy + ih - 26);
-  ctx.textAlign = 'left';
+  // ── Left: Passive items ───────────────────────────────
+  ctx.font = '6px "Press Start 2P"'; ctx.fillStyle = '#cc8800';
+  ctx.fillText('PASSIVE ITEMS', col1, y1); y1 += 14;
+  ctx.fillStyle = '#331800';
+  ctx.fillRect(col1, y1, iw/2-24, 1); y1 += 6;
+
+  const passives = [
+    { flag: player.bloodCharm,   label: 'BLOOD CHARM',   desc: 'Kills heal 1 HP',           color: '#ff2244' },
+    { flag: player.cursedBlade,  label: 'CURSED BLADE',  desc: '+2 dmg, -1 HP per swing',   color: '#cc44ff' },
+    { flag: player.shadowCloak,  label: 'SHADOW CLOAK',  desc: 'Shadows ignore you in light',color: '#6644aa' },
+    { flag: player.spiderRing,   label: 'SPIDER RING',   desc: 'Bypass pressure plates',    color: '#44ff44' },
+    { flag: player.lavaBoots,    label: 'LAVA BOOTS',    desc: 'Lava deals no damage',       color: '#ff4400' },
+    { flag: player.wraithWard,   label: 'WRAITH WARD',   desc: 'Wraiths can\'t drain oil',   color: '#4488ff' },
+    { flag: player.boneShield,   label: 'BONE SHIELD',   desc: 'Blocks first projectile',    color: '#ccbbaa' },
+    { flag: player.treasureEye,  label: 'TREASURE EYE',  desc: 'Secret walls glow faintly',  color: '#ffddaa' },
+    { flag: player.dungeonKey,   label: 'DUNGEON KEY',   desc: 'Opens secret walls (HC)',    color: '#ffdd44' },
+    { flag: player.gildedFlask,  label: 'GILDED FLASK',  desc: 'Excess oil → gold',          color: '#ffdd44' },
+    { flag: player.vitalFlask,   label: 'VITAL FLASK',   desc: 'Excess oil → HP',            color: '#ff4488' },
+    { flag: (player.voidCloaks||0)>0, label: 'VOID CLOAK', desc: `${player.voidCloaks||0} charges left`, color: '#aa88ff' },
+  ];
+  const owned_pass = passives.filter(p => p.flag);
+  if (owned_pass.length === 0) {
+    ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#332200';
+    ctx.fillText('No passive items.', col1+4, y1+10); y1 += 20;
+  } else {
+    for (const p of owned_pass) {
+      if (y1 > contentY + contentH - 30) break;
+      ctx.fillStyle = '#0a0800';
+      ctx.fillRect(col1, y1, iw/2-24, 18);
+      ctx.strokeStyle = p.color + '66'; ctx.lineWidth = 1;
+      ctx.strokeRect(col1, y1, iw/2-24, 18);
+      ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = p.color;
+      ctx.fillText(p.label, col1+4, y1+7);
+      ctx.fillStyle = '#443322';
+      ctx.fillText(p.desc, col1+4, y1+15);
+      y1 += 22;
+    }
+  }
+
+  // ── Right: Boosts (use with ENTER) ────────────────────
+  ctx.font = '6px "Press Start 2P"'; ctx.fillStyle = '#44ffaa';
+  ctx.fillText('BOOSTS  (ENTER: use)', col2, y2); y2 += 14;
+  ctx.fillStyle = '#113322';
+  ctx.fillRect(col2, y2, iw/2-24, 1); y2 += 6;
+
+  if (boostInventory.length === 0) {
+    ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#224433';
+    ctx.fillText('No boosts saved.', col2+4, y2+10); y2 += 20;
+    ctx.fillText('Buy from merchant.', col2+4, y2);
+  } else {
+    boostInventory.forEach((b2, i) => {
+      if (y2 > contentY + contentH - 30) return;
+      const sel = i === buffCursor;
+      const pulse = sel ? 0.6+Math.sin(timestamp*0.006)*0.4 : 0;
+      ctx.fillStyle = sel ? '#0a1810' : '#050a08';
+      ctx.fillRect(col2, y2, iw/2-24, 22);
+      ctx.strokeStyle = sel ? b2.color : '#113322';
+      ctx.lineWidth = sel ? 2 : 1;
+      if (sel) { ctx.shadowColor=b2.color; ctx.shadowBlur=8*pulse; }
+      ctx.strokeRect(col2, y2, iw/2-24, 22);
+      ctx.shadowBlur=0; ctx.lineWidth=1;
+      ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = sel ? b2.color : '#448866';
+      ctx.fillText((sel?'▶ ':'')+b2.name, col2+4, y2+8);
+      ctx.fillStyle = '#226644';
+      ctx.fillText(b2.desc, col2+4, y2+18);
+      y2 += 26;
+    });
+    ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#226644';
+    ctx.textAlign = 'center';
+    ctx.fillText('W/S: SELECT BOOST     ENTER: USE', col2 + (iw/2-24)/2, y2+10);
+    ctx.textAlign = 'left';
+  }
+}
+
+// ── Tab 2: Status ─────────────────────────────────────────
+function drawInvTabStatus(ix, contentY, iw, contentH, timestamp) {
+  const col1 = ix+16, col2 = ix+iw/2+8;
+  let y1 = contentY+6, y2 = contentY+6;
+
+  function sRow(label, val, color, yRef, col) {
+    ctx.fillStyle = '#0a0800';
+    ctx.fillRect(col, yRef, iw/2-24, 18);
+    ctx.strokeStyle = color+'66'; ctx.lineWidth=1;
+    ctx.strokeRect(col, yRef, iw/2-24, 18);
+    ctx.font='5px "Press Start 2P"'; ctx.fillStyle=color;
+    ctx.fillText(label, col+4, yRef+7);
+    ctx.fillStyle='#443322';
+    ctx.fillText(val, col+4, yRef+15);
+    return yRef+22;
+  }
+
+  // ── Left: Active buffs ────────────────────────────────
+  ctx.font='6px "Press Start 2P"'; ctx.fillStyle='#44ff88';
+  ctx.fillText('ACTIVE BUFFS', col1, y1); y1+=14;
+  ctx.fillStyle='#113322'; ctx.fillRect(col1, y1, iw/2-24, 1); y1+=6;
+
+  const buffs = [];
+  if ((player.boostSpeedTimer||0)>0)    buffs.push({ label:'HASTE',        val:`${(player.boostSpeedTimer/1000).toFixed(1)}s remaining`,  color:'#44ffaa' });
+  if ((player.boostDmgTimer||0)>0)      buffs.push({ label:'BERSERK',      val:`${(player.boostDmgTimer/1000).toFixed(1)}s remaining`,    color:'#ff2200' });
+  if ((player.invincible||0)>500)      buffs.push({ label:'GHOST SHROUD',  val:`${(player.invincible/1000).toFixed(1)}s remaining`, color:'#aa88ff' });
+  if ((player.goldMagnetTimer||0)>0)    buffs.push({ label:'GOLD MAGNET',  val:`${(player.goldMagnetTimer/1000).toFixed(1)}s remaining`,  color:'#ffdd44' });
+  if ((player.oilFilterTimer||0)>0)     buffs.push({ label:'OIL FILTER',   val:`${(player.oilFilterTimer/1000).toFixed(1)}s remaining`,   color:'#ff9900' });
+  if ((player.depthCandleTimer||0)>0)   buffs.push({ label:'DEPTH CANDLE', val:`${(player.depthCandleTimer/1000).toFixed(1)}s remaining`, color:'#ffff44' });
+  if ((player.goldMultiTimer||0)>0)     buffs.push({ label:'GOLD 3x',       val:`${(player.goldMultiTimer/1000).toFixed(1)}s remaining`,  color:'#ffdd44' });
+
+
+  if (buffs.length===0) {
+    ctx.font='5px "Press Start 2P"'; ctx.fillStyle='#224433';
+    ctx.fillText('No active buffs.', col1+4, y1+10);
+  } else {
+    for (const b of buffs) { if (y1>contentY+contentH-30) break; y1=sRow(b.label,b.val,b.color,y1,col1); }
+  }
+
+  // ── Right: Debuffs ─────────────────────────────────────
+  ctx.font='6px "Press Start 2P"'; ctx.fillStyle='#ff4444';
+  ctx.fillText('DEBUFFS & CURSES', col2, y2); y2+=14;
+  ctx.fillStyle='#440011'; ctx.fillRect(col2, y2, iw/2-24, 1); y2+=6;
+
+  const debuffs = [];
+  if ((player.darkPatchTimer||0)>0)     debuffs.push({ label:'BLINDED',    val:`${(player.darkPatchTimer/1000).toFixed(1)}s — vision reduced`,    color:'#334488' });
+  if ((player.icePatchTimer||0)>0)      debuffs.push({ label:'SLOWED',     val:`${(player.icePatchTimer/1000).toFixed(1)}s — move speed halved`,   color:'#88ccff' });
+  if ((player.burning||0)>0)            debuffs.push({ label:'BURNING',    val:`${(player.burning/1000).toFixed(1)}s — taking fire damage`,        color:'#ff6600' });
+  if (activeCurses && activeCurses.length>0) {
+    for (const cid of activeCurses) {
+      const cd = CURSE_DEFS ? CURSE_DEFS.find(d=>d.id===cid) : null;
+      debuffs.push({ label:'CURSE: '+(cd?cd.name:cid).toUpperCase(), val: cd?cd.shortDesc||cd.desc.slice(0,40):'active', color:'#cc44ff' });
+    }
+  }
+
+  if (debuffs.length===0) {
+    ctx.font='5px "Press Start 2P"'; ctx.fillStyle='#331122';
+    ctx.fillText('No debuffs. Lucky.', col2+4, y2+10);
+  } else {
+    for (const d of debuffs) { if (y2>contentY+contentH-30) break; y2=sRow(d.label,d.val,d.color,y2,col2); }
+  }
+
+  // ── Player stats summary ──────────────────────────────
+  const sy = Math.max(y1, y2) + 10;
+  if (sy < contentY+contentH-50) {
+    ctx.fillStyle='#221100'; ctx.fillRect(ix+10, sy, iw-20, 1);
+    const statY = sy+12;
+    const stats = [
+      `HP: ${player.hp} / ${player.maxHp}`,
+      `ARMOR: ${player.armor}`,
+      `DMG: ${player.attackDamage}`,
+      `OIL: ${Math.ceil(oil)}%`,
+    ];
+    ctx.font='5px "Press Start 2P"'; ctx.fillStyle='#554433'; ctx.textAlign='center';
+    ctx.fillText(stats.join('     '), W/2, statY);
+    ctx.textAlign='left';
+  }
 }
 
 
+
+function drawModifierScreen(timestamp) {
+  ctx.fillStyle = 'rgba(0,0,0,0.94)';
+  ctx.fillRect(0, 0, W, H);
+
+  const pw = Math.min(W-40, 660), ph = Math.min(H-40, 500);
+  const px = (W-pw)/2, py = (H-ph)/2;
+
+  ctx.fillStyle = '#06050a';
+  ctx.fillRect(px, py, pw, ph);
+  ctx.strokeStyle = '#664488'; ctx.lineWidth = 2; ctx.strokeRect(px, py, pw, ph);
+  ctx.strokeStyle = '#221133'; ctx.lineWidth = 1; ctx.strokeRect(px+5,py+5,pw-10,ph-10);
+
+  ctx.textAlign = 'center';
+  ctx.font = '12px "Press Start 2P"';
+  ctx.fillStyle = '#cc88ff';
+  ctx.fillText('RUN MODIFIERS', W/2, py+30);
+
+  ctx.font = '6px "Press Start 2P"';
+  ctx.fillStyle = '#9966bb';
+  ctx.fillText('optional challenges that change how the run plays  —  pick up to '+MAX_MODIFIERS, W/2, py+46);
+
+  ctx.textAlign = 'left';
+
+  // Echo multiplier preview
+  let totalMult = 1.0;
+  for (const id of activeModifiers) {
+    const d = MODIFIER_DEFS.find(m=>m.id===id);
+    if (d) totalMult *= d.echoMult;
+  }
+  const multColor = totalMult >= 1.5 ? '#ffdd44' : totalMult >= 1.2 ? '#ffaa44' : totalMult < 1 ? '#ff4444' : '#88ff88';
+  ctx.textAlign = 'center';
+  ctx.font = '7px "Press Start 2P"';
+  ctx.fillStyle = multColor;
+  ctx.fillText('ECHO MULTIPLIER: x' + totalMult.toFixed(2) + '  (' + activeModifiers.size + '/' + MAX_MODIFIERS + ' active)', W/2, py+62);
+  ctx.textAlign = 'left';
+
+  // Grid of modifiers: 2 columns
+  const slotW = (pw-60)/2, slotH = 56, gap = 8;
+  const startY = py+76;
+  const col1 = px+20, col2 = px+20+slotW+gap;
+
+  MODIFIER_DEFS.forEach((def, i) => {
+    const col = i%2===0 ? col1 : col2;
+    const row = Math.floor(i/2);
+    const sy = startY + row*(slotH+gap);
+    const active = activeModifiers.has(def.id);
+    const incompatible = def.incompatible.some(id => activeModifiers.has(id))
+                      || (activeModifiers.size >= MAX_MODIFIERS && !active);
+    const selected = i === modCursor;
+    const pulse = selected ? 0.6+Math.sin(timestamp*0.005)*0.4 : 0;
+
+    ctx.fillStyle = active ? '#130820' : incompatible ? '#0a080a' : '#0c0a12';
+    ctx.fillRect(col, sy, slotW, slotH);
+    ctx.strokeStyle = active ? def.color : selected ? '#664488' : '#221133';
+    ctx.lineWidth = active||selected ? 2 : 1;
+    if (active||selected) { ctx.shadowColor=def.color; ctx.shadowBlur=8*pulse; }
+    ctx.strokeRect(col, sy, slotW, slotH);
+    ctx.shadowBlur=0; ctx.lineWidth=1;
+
+    // Icon + name
+    ctx.font = '6px "Press Start 2P"';
+    ctx.fillStyle = incompatible&&!active ? '#554455' : active ? def.color : selected ? '#cc88ff' : '#aa88bb';
+    ctx.fillText(def.icon+' '+def.name, col+6, sy+14);
+
+    // Echo tag
+    const multStr = def.echoMult >= 1 ? '+' : '';
+    ctx.font = '5px "Press Start 2P"';
+    ctx.fillStyle = def.echoMult < 1 ? '#ff4444' : '#ffdd44';
+    ctx.textAlign = 'right';
+    ctx.fillText('x'+def.echoMult.toFixed(2)+' echo', col+slotW-6, sy+14);
+    ctx.textAlign = 'left';
+
+    // Desc
+    ctx.font = '5px "Press Start 2P"';
+    ctx.fillStyle = incompatible&&!active ? '#554455' : '#9977aa';
+    // Word-wrap to slotW
+    const words = def.desc.split(' ');
+    let line='', ly2=sy+27;
+    for (const w of words) {
+      const test=line+(line?' ':'')+w;
+      if (ctx.measureText(test).width>slotW-12&&line) {
+        ctx.fillText(line,col+6,ly2); ly2+=11; line=w;
+      } else line=test;
+    }
+    if (line) ctx.fillText(line, col+6, ly2);
+
+    // Active badge
+    if (active) {
+      ctx.fillStyle=def.color; ctx.font='5px "Press Start 2P"';
+      ctx.textAlign='right';
+      ctx.fillText('✦ ON', col+slotW-6, sy+slotH-8);
+      ctx.textAlign='left';
+    }
+    if (incompatible && !active) {
+      ctx.fillStyle='#886688'; ctx.font='5px "Press Start 2P"';
+      ctx.textAlign='right';
+      ctx.fillText('LOCKED', col+slotW-6, sy+slotH-8);
+      ctx.textAlign='left';
+    }
+  });
+
+  // Controls
+  ctx.textAlign='center'; ctx.font='6px "Press Start 2P"'; ctx.fillStyle='#7755aa';
+  ctx.fillText('ARROWS: navigate     ENTER/SPACE: toggle     BACKSPACE: clear all     ESC/R: start run', W/2, py+ph-14);
+  ctx.textAlign='left';
+}
+
+let modCursor = 0;
+
+
+
+function drawPlaygroundScreen(timestamp) {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  // subtle scanlines
+  ctx.fillStyle = 'rgba(100,200,100,0.02)';
+  for (let sy2 = 0; sy2 < H; sy2 += 4) ctx.fillRect(0, sy2, W, 1);
+
+  const pw = Math.min(W-30, 700), ph = Math.min(H-30, 560);
+  const px2 = (W-pw)/2, py2 = (H-ph)/2;
+
+  ctx.fillStyle = '#040a04';
+  ctx.fillRect(px2, py2, pw, ph);
+  ctx.strokeStyle = '#446644'; ctx.lineWidth = 2;
+  ctx.strokeRect(px2, py2, pw, ph);
+  ctx.strokeStyle = '#223322'; ctx.lineWidth = 1;
+  ctx.strokeRect(px2+4, py2+4, pw-8, ph-8);
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.font = '11px "Press Start 2P"';
+  ctx.fillStyle = '#66ff88';
+  ctx.shadowColor = '#33ff66'; ctx.shadowBlur = 10;
+  ctx.fillText('PLAYGROUND', W/2, py2+26);
+  ctx.shadowBlur = 0;
+  ctx.font = '5px "Press Start 2P"';
+  ctx.fillStyle = '#335533';
+  ctx.fillText('no echoes  ·  no records  ·  full control', W/2, py2+40);
+
+  // Two columns
+  const colW = (pw-40)/2, col1x = px2+14, col2x = px2+14+colW+12;
+  let rowY1 = py2+56, rowY2 = py2+56;
+  const rowH = 18;
+
+  let settingIdx = 0; // tracks which PG_SETTING_ROWS entry we're on (for cursor)
+
+  PG_ROWS.forEach((row, ri) => {
+    // Split: left col = PLAYER+seed rows (indices 0-7), right col = WORLD+EXPERIMENTAL
+    const isLeft = ri <= 7; // section PLAYER + its rows + seed
+    const colX = isLeft ? col1x : col2x;
+    let rowY = isLeft ? rowY1 : rowY2;
+
+    if (row.section) {
+      // Section header
+      ctx.font = '6px "Press Start 2P"';
+      const secColor = row.section === 'EXPERIMENTAL' ? '#ffaa44' : '#446644';
+      ctx.fillStyle = secColor;
+      ctx.textAlign = 'left';
+      ctx.fillText('── ' + row.section, colX, rowY + 10);
+      if (isLeft) rowY1 += rowH + 2; else rowY2 += rowH + 2;
+      return;
+    }
+
+    // Find cursor index for this setting
+    const sIdx = PG_SETTING_ROWS.indexOf(row);
+    const selected = sIdx === pgCursor;
+    const isExp = row.id === 'parry' || row.id === 'newAttacks' || row.id === 'floorEvents' || row.id === 'godMode';
+
+    // Row bg
+    ctx.fillStyle = selected ? '#0a1a0a' : '#030803';
+    ctx.fillRect(colX, rowY, colW, rowH-1);
+    if (selected) {
+      ctx.strokeStyle = '#44ff66'; ctx.lineWidth = 1;
+      ctx.strokeRect(colX, rowY, colW, rowH-1);
+    }
+
+    // Label
+    ctx.font = '5px "Press Start 2P"';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = selected ? '#aaffaa' : isExp ? '#aa7733' : '#668866';
+    ctx.fillText(row.label, colX+5, rowY+11);
+
+    // Value
+    if (row.type === 'seed') {
+      const displaySeed = pgSeedTyping ? pgSeedInput + '▌' : String(pgCfg.seed);
+      ctx.textAlign = 'right';
+      ctx.font = '5px "Press Start 2P"';
+      ctx.fillStyle = pgSeedTyping ? '#ffff44' : selected ? '#ffdd44' : '#886633';
+      ctx.fillText(displaySeed, colX+colW-5, rowY+11);
+      if (selected && !pgSeedTyping) {
+        ctx.fillStyle = '#555533';
+        ctx.font = '4px "Press Start 2P"';
+        ctx.fillText('ENTER=type  ◄►=random', colX+colW-5, rowY+rowH+1);
+      }
+    } else {
+      const val = pgValue(row);
+      const valColor = row.type === 'bool'
+        ? (pgCfg[row.id] ? '#44ff88' : '#ff4444')
+        : selected ? '#ffdd44' : '#886633';
+      ctx.textAlign = 'right';
+      ctx.font = '5px "Press Start 2P"';
+      ctx.fillStyle = valColor;
+      ctx.fillText((selected ? '◄ ' : '') + val + (selected ? ' ►' : ''), colX+colW-5, rowY+11);
+    }
+
+    if (isLeft) rowY1 += rowH; else rowY2 += rowH;
+  });
+
+  // Bottom bar
+  const botY = py2+ph-22;
+  ctx.fillStyle = '#020902';
+  ctx.fillRect(px2+1, botY, pw-2, 21);
+  ctx.strokeStyle = '#223322'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(px2+1, botY); ctx.lineTo(px2+pw-1, botY); ctx.stroke();
+  ctx.textAlign = 'center';
+  ctx.font = '5px "Press Start 2P"';
+  ctx.fillStyle = '#335533';
+  if (pgSeedTyping) {
+    ctx.fillStyle = '#aaaa44';
+    ctx.fillText('TYPE SEED  ·  ENTER to confirm  ·  ESC to cancel', W/2, botY+13);
+  } else {
+    ctx.fillText('W/S or ↑↓ navigate   ·   A/D or ◄► adjust   ·   ENTER launch   ·   ESC back', W/2, botY+13);
+  }
+}
 
 function drawMerchant(ctx, sx, sy, lit, timestamp, wx, wy) {
   if (lit < 0.05) return;
@@ -5031,7 +5876,32 @@ function drawStartMenu(timestamp) {
     }
   });
 
-  const bottomY = cardY + cardH*2 + spacing + 16;
+  // Playground tile — wide, below 2×2
+  const pgTileY = cardY + cardH*2 + spacing + 4;
+  const pgTileW = totalW, pgTileH = 34;
+  const pgTileX = startX;
+  const pgSel = startMenuCursor === 4;
+  const pgPulse = pgSel ? 0.7 + Math.sin(t*0.004)*0.3 : 0;
+  ctx.fillStyle = '#020a02';
+  ctx.fillRect(pgTileX, pgTileY, pgTileW, pgTileH);
+  ctx.strokeStyle = pgSel ? '#66ff88' : '#224422';
+  ctx.lineWidth = pgSel ? 2 : 1;
+  if (pgSel) { ctx.shadowColor = '#44ff66'; ctx.shadowBlur = 12*pgPulse; }
+  ctx.strokeRect(pgTileX, pgTileY, pgTileW, pgTileH);
+  ctx.shadowBlur = 0; ctx.lineWidth = 1;
+  ctx.font = '8px "Press Start 2P"';
+  ctx.fillStyle = pgSel ? '#66ff88' : '#335533';
+  ctx.textAlign = 'center';
+  ctx.fillText('🔧 PLAYGROUND', W/2, pgTileY+14);
+  ctx.font = '5px "Press Start 2P"';
+  ctx.fillStyle = pgSel ? '#44aa55' : '#223322';
+  ctx.fillText('sandbox mode  ·  configure everything  ·  no echoes earned', W/2, pgTileY+26);
+  if (pgSel) {
+    ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#66ff88';
+    ctx.fillText('▼ SELECTED ▼', W/2, pgTileY+pgTileH-4);
+  }
+
+  const bottomY = cardY + cardH*2 + spacing + pgTileH + 22;
   ctx.font = '6px "Press Start 2P"';
   ctx.fillStyle = '#443322';
   ctx.textAlign = 'center';
@@ -5870,7 +6740,6 @@ function drawLoreTabControls(x, cy, w) {
   cy = lSec('COMBAT', '#ff8844', x, cy);
   kRow('SPACE',     'Swing sword / fire torch / use weapon',  'Hold to charge — release for 3x damage hit');
   kRow('V',         'Dash — 2 tiles, invincible mid-dash',    '900ms cooldown. Passes through enemies.');
-  kRow('X',         'Parry — opens 280ms block window',       'Successful parry reflects 3x damage back');
   kRow('F',         'Ground pound — shockwave all directions','Knocks nearby enemies back');
   kRow('G',         'Throw bomb — 1.2s fuse, radius 3',       'Buy bombs from shop first');
   kRow('B',         'Throw bone (skeleton drop)',              'Damages and stuns on hit');
@@ -5907,7 +6776,6 @@ function drawLoreTabControls(x, cy, w) {
       ['LEFT SIDE DRAG',  'Move in drag direction',  ''],
       ['TAP  (right)',    'Attack',                  ''],
       ['SWIPE RIGHT',     'Dash',                    'in facing direction'],
-      ['SWIPE LEFT',      'Parry',                   '280ms block window'],
       ['SWIPE UP',        'Ground pound',            'shockwave all dirs'],
       ['SWIPE DOWN',      'Throw bomb',              'buy from shop first'],
     ];
@@ -5960,7 +6828,6 @@ function drawLoreTabCombat(x, cy, w) {
   cy = lSec('ABILITIES', '#ff8844', x, cy);
   const abilRows = [
     ['DASH [V]',       '#44aaff', '900ms cooldown. Dash 2 tiles in facing direction. Invincible during dash. Passes through enemies.'],
-    ['PARRY [X]',      '#00ffff', 'Opens a 280ms parry window. If an enemy hits you during it: reflect 3x dmg back + knockback. Short cooldown on success.'],
     ['GROUND POUND [F]','#ffaa00','Expanding shockwave ring in all directions. Knocks enemies back. Cooldown shown as gold arc.'],
     ['BOMB [G]',        '#ff8800', 'Throw a bomb — 1.2s fuse, explodes in radius 3. Buy from shop. Knocks enemies back.'],
   ];
@@ -5978,10 +6845,11 @@ function drawLoreTabCombat(x, cy, w) {
     'Health potions (red flask) restore 75% of max HP.',
     'Armor upgrades increase both damage reduction AND max HP.',
     'Dash through tight corridors to avoid being surrounded.',
-    'Parry at the last second — the cyan flash shows the window.',
     'Charged sword attacks knock enemies back 2 tiles.',
     'Bombs are great for boss fights — buy a stash first.',
     'Torch ignites enemies; they keep taking damage after you move.',
+    'Any weapon breaks secret walls — look for slightly darker wall tiles.',
+    'HARDCORE only: buy a Dungeon Key from the merchant to open secret rooms (reusable).',
   ];
   for (const tip of tips) {
     ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#776655';
@@ -6300,6 +7168,23 @@ function drawLoreTabCombos(x, cy, w) {
   cy = lLine('More combinations may exist. Experiment freely.', x, cy, '#443355', 6, 13);
 }
 
+
+function drawOilVignette() {
+  const oilPct = oil / maxOil();
+  if (oilPct > 0.25) return;
+  const intensity = (1 - oilPct / 0.25); // 0 at 25%, 1 at 0%
+  const pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.004 * (1 + intensity));
+  const alpha = intensity * 0.55 * pulse;
+
+  const grad = ctx.createRadialGradient(W/2, H/2, H * 0.25, W/2, H/2, H * 0.85);
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(1, `rgba(180,20,0,${alpha.toFixed(3)})`);
+  ctx.save();
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+}
+
 function drawQuitConfirm() {
   ctx.save();
   ctx.globalAlpha = 0.88;
@@ -6422,6 +7307,169 @@ function drawBossHealthBar(timestamp) {
   ctx.restore();
 }
 
+// ── Random event rooms ──────────────────────────────────
+// ── Run Modifier Definitions ─────────────────────────────────────
+const MODIFIER_DEFS = [
+  { id:'iron_start',  name:'IRON START',   icon:'🔥', color:'#ff8844',
+    desc:'Begin with Torch instead of Sword.',
+    echoMult:1.1, incompatible:[] },
+  { id:'gold_curse',  name:'GOLD CURSE',   icon:'💰', color:'#ffdd00',
+    desc:'Gold drops doubled. Max oil capacity halved.',
+    echoMult:1.3, incompatible:[] },
+  { id:'horde',       name:'HORDE MODE',   icon:'💀', color:'#ff4444',
+    desc:'50% more enemies spawn. Everything hits harder.',
+    echoMult:1.4, incompatible:[] },
+  { id:'fragile',     name:'FRAGILE',      icon:'💔', color:'#ff6688',
+    desc:'Max HP is 10, but armor upgrades are free.',
+    echoMult:1.3, incompatible:['horde'] },
+  { id:'oil_miser',   name:'OIL MISER',    icon:'🛢', color:'#ff9900',
+    desc:'Oil drains twice as fast. Shop prices halved.',
+    echoMult:1.3, incompatible:['gold_curse'] },
+  { id:'dark_world',  name:'DARK WORLD',   icon:'🌑', color:'#6644aa',
+    desc:'All enemies deal +1 damage. Light radius reduced by 2.',
+    echoMult:1.4, incompatible:[] },
+  { id:'pacifist',    name:'PACIFIST',     icon:'🕊', color:'#88ffcc',
+    desc:'Enemies only aggro if you attack first. Chests yield 50% less gold.',
+    echoMult:1.2, incompatible:['horde'] },
+  { id:'headstart',   name:'HEADSTART',    icon:'🎒', color:'#44aaff',
+    desc:'Begin with 300g and 3 bombs. Earn 25% fewer echoes.',
+    echoMult:0.75, incompatible:[] },
+];
+
+function hasMod(id) { return activeModifiers.has(id); }
+
+const EVENT_DEFS = [
+  {
+    id: 'cursed_chest',
+    banner: 'A CURSED CHEST...',
+    bannerColor: '#cc44ff',
+    desc: 'A chest sealed with dark runes. Open it for gold — but at a cost.',
+    triggerKey: 'cursed_chest',
+  },
+  {
+    id: 'void_shrine',
+    banner: 'VOID SHRINE',
+    bannerColor: '#6622aa',
+    desc: 'A shrine that whispers. Pray to gain a perk — and lose 20% max HP.',
+    triggerKey: 'void_shrine',
+  },
+  {
+    id: 'bone_altar',
+    banner: 'BONE ALTAR',
+    bannerColor: '#ccbbaa',
+    desc: 'An altar of bones. Sacrifice HP to fill your oil completely.',
+    triggerKey: 'bone_altar',
+  },
+  {
+    id: 'trapped_vault',
+    banner: 'TRAPPED VAULT',
+    bannerColor: '#ffaa00',
+    desc: 'A vault locked with a pressure plate. Step in — enemies flood the room.',
+    triggerKey: 'trapped_vault',
+  },
+];
+let activeEvent = null; // { def, wx, wy, triggered }
+
+function rollRandomEvent(pcx, pcy) {
+  if (gameMode !== 'combat' && gameMode !== 'hardcore' && gameMode !== 'story') return;
+  if (activeEvent) return; // only one at a time
+  const depth = Math.round(Math.sqrt(player.wx**2 + player.wy**2) / 5);
+  if (depth < 5) return;
+  if (Math.random() > 0.04) return; // 4% per chunk
+
+  const def = EVENT_DEFS[Math.floor(Math.random() * EVENT_DEFS.length)];
+  // Find a walkable tile near center of chunk
+  const wx = pcx * CHUNK + Math.floor(CHUNK/2);
+  const wy = pcy * CHUNK + Math.floor(CHUNK/2);
+  activeEvent = { def, wx, wy, triggered: false };
+
+  banners.push({ text: def.banner, color: def.bannerColor, life: 3500, maxLife: 3500 });
+}
+
+function checkEventTrigger() {
+  if (!activeEvent || activeEvent.triggered) return;
+  const dist = Math.abs(player.wx - activeEvent.wx) + Math.abs(player.wy - activeEvent.wy);
+  if (dist > 3) return;
+
+  activeEvent.triggered = true;
+  const { def } = activeEvent;
+
+  if (def.id === 'cursed_chest') {
+    // Gain 200-400g but gain a random curse
+    const reward = 200 + Math.floor(Math.random() * 200);
+    gold += reward;
+    spawnFloatText(player.wx, player.wy, `+${reward}g CURSED`, '#cc44ff');
+    if (activeCurses.length < 3) rollCurses(1);
+    triggerFlash('#cc44ff33', 600);
+    triggerShake(4, 300);
+    SFX.play('chest');
+  }
+  else if (def.id === 'void_shrine') {
+    // Gain a random perk but lose 20% max HP
+    const voidPerks = ['swift_feet','iron_skin','second_wind','treasure_sense','oil_saver'];
+    const rp = voidPerks[Math.floor(Math.random() * voidPerks.length)];
+    if (!META.perks.includes(rp)) {
+      META.perks.push(rp);
+      applyClassAndPerks();
+      spawnFloatText(player.wx, player.wy, 'PERK: ' + rp.toUpperCase().replace('_',' '), '#6622aa');
+    }
+    const hpLoss = Math.ceil(player.maxHp * 0.2);
+    player.maxHp = Math.max(4, player.maxHp - hpLoss);
+    player.hp = Math.min(player.hp, player.maxHp);
+    spawnFloatText(player.wx, player.wy - 1, `-${hpLoss} MAX HP`, '#ff2244');
+    triggerFlash('#6622aa44', 600);
+    SFX.play('shrine');
+  }
+  else if (def.id === 'bone_altar') {
+    // Pay 30% of current HP to fill oil
+    const hpCost = Math.ceil(player.hp * 0.3);
+    if (player.hp > hpCost + 1) {
+      player.hp -= hpCost;
+      gainOil(maxOil());
+      spawnFloatText(player.wx, player.wy, `OIL FULL! -${hpCost}HP`, '#ccbbaa');
+      triggerFlash('#ccbbaa33', 400);
+      SFX.play('oil_flask');
+    } else {
+      spawnFloatText(player.wx, player.wy, 'NOT ENOUGH HP', '#aa6644');
+    }
+  }
+  else if (def.id === 'trapped_vault') {
+    // Spawn 4-6 enemies around player
+    const spawnDirs = [[1,0],[-1,0],[0,1],[0,-1],[2,0],[0,2]];
+    let spawned = 0;
+    for (const [dx2,dy2] of spawnDirs) {
+      const ex = player.wx+dx2, ey = player.wy+dy2;
+      if (isWalkable(ex,ey) && !enemies.some(e=>e.wx===ex&&e.wy===ey)) {
+        const types = Object.keys(ENEMY_TYPES);
+        const tIdx = Math.floor(Math.random()*types.length);
+        const eDef = ENEMY_TYPES[types[tIdx]];
+        enemies.push({type:types[tIdx], def:eDef, wx:ex, wy:ey, px:ex*TILE, py:ey*TILE,
+          hp:eDef.hp, maxHp:eDef.hp, moveTimer:100, hitFlash:0, spawnChunk:`event`});
+        spawned++;
+      }
+    }
+    // Drop chest at a nearby walkable tile (not player's current tile)
+    const _dirs = [[0,1],[1,0],[-1,0],[0,-1],[1,1],[-1,1]];
+    for (const [_tx,_ty] of _dirs) {
+      const _wx2 = player.wx+_tx, _wy2 = player.wy+_ty;
+      if (isWalkable(_wx2, _wy2)) {
+        const cx3=Math.floor(_wx2/CHUNK), cy3=Math.floor(_wy2/CHUNK);
+        const ch3=getChunk(cx3,cy3);
+        const lx3=((_wx2%CHUNK)+CHUNK)%CHUNK, ly3=((_wy2%CHUNK)+CHUNK)%CHUNK;
+        ch3.objects.push({type:'chest', lx:lx3, ly:ly3});
+        spawnFloatText(_wx2, _wy2-1, 'CHEST!', '#ffaa00');
+        break;
+      }
+    }
+    spawnFloatText(player.wx, player.wy, 'TRAPPED! x'+spawned, '#ffaa00');
+    triggerFlash('#ff440044', 500);
+    triggerShake(6, 400);
+    SFX.play('door_open');
+  }
+
+  activeEvent = null;
+}
+
 function applyUpgrades() {
   tileCacheDirty = true; // light radius may change
   player.lightRadius = 7 + (player._classLightBonus || 0) + getUpgradeValue('light') * 2 + (hasPerk('echo_sight') ? 1 : 0);
@@ -6432,9 +7480,13 @@ function applyUpgrades() {
   player.attackCooldownMax = Math.max(150, 300 - getUpgradeValue('attackspeed') * 50);
   player.armor = getUpgradeValue('armor') + (player._perkArmor || 0);
   player.chargeMax = Math.max(300, 600 - getUpgradeValue('attackspeed') * 100);
+  // Crit chance
+  player.critChance = getUpgradeValue('crit') * 0.10; // 10/20/30%
+  // Regen speed: steps between heals
+  player.regenInterval = Math.max(10, 40 - getUpgradeValue('regen') * 10); // 40/30/20/10
   // Hardcore: less max HP, but armor still helps a bit
-  player.maxHp = gameMode === 'hardcore'
-    ? 12 + getUpgradeValue('armor') * 2
+  player.maxHp = hasMod('fragile') ? 10
+    : gameMode === 'hardcore' ? 12 + getUpgradeValue('armor') * 2
     : 20 + getUpgradeValue('armor') * 4;
 }
 
@@ -6461,10 +7513,11 @@ function useBoost(idx) {
   if (!b) return;
   boostInventory.splice(idx, 1);
   if (boostCursor >= boostInventory.length) boostCursor = Math.max(0, boostInventory.length - 1);
+  if (buffCursor >= boostInventory.length) buffCursor = Math.max(0, boostInventory.length - 1);
   switch (b.id) {
     case 'hp50':      { const h=Math.min(50,player.maxHp-player.hp); player.hp+=h; spawnFloatText(player.wx,player.wy-1,`+${h}HP`,'#ff4466'); break; }
     case 'hp_full':   { player.hp=player.maxHp; spawnFloatText(player.wx,player.wy-1,'FULL HP!','#ff88aa'); break; }
-    case 'oil_full':  { oil=maxOil(); spawnFloatText(player.wx,player.wy-1,'OIL FULL!','#ff9900'); break; }
+    case 'oil_full':  { gainOil(maxOil()); spawnFloatText(player.wx,player.wy-1,'OIL FULL!','#ff9900'); break; }
     case 'invincible':{ player.invincible=5000; spawnFloatText(player.wx,player.wy-1,'GHOST SHROUD!','#aa88ff'); break; }
     case 'speed':     { player.boostSpeedTimer=8000; spawnFloatText(player.wx,player.wy-1,'HASTE!','#44ffaa'); break; }
     case 'dmg':       { player.boostDmgTimer=6000; spawnFloatText(player.wx,player.wy-1,'BERSERK!','#ff2200'); break; }
@@ -6594,6 +7647,9 @@ const MERCHANT_ITEMS = [
   { id:'wraith_ward', name:'WRAITH WARD',         desc:'Wraithes cannot drain your oil.',   cost:400, weight:2, type:'exclusive' },
   { id:'bone_shield', name:'BONE SHIELD',         desc:'Blocks first projectile each room.',cost:380, weight:2, type:'exclusive' },
   { id:'treasure_eye',name:'TREASURE EYE',        desc:'Secret walls glow faintly from afar.',cost:480,weight:2,type:'exclusive' },
+  { id:'dungeon_key',  name:'DUNGEON KEY',          desc:'HARDCORE: required to break secret walls. Reusable.',cost:350,weight:3,type:'exclusive' },
+  { id:'gilded_flask', name:'GILDED FLASK',        desc:'Excess oil converts to gold (2g per 1%).',  cost:1200, weight:1, type:'exclusive' },
+  { id:'vital_flask',  name:'VITAL FLASK',         desc:'Excess oil converts to HP (1HP per 4%).',   cost:1200, weight:1, type:'exclusive' },
 ];
 
 function rollMerchantStock(seedWx, seedWy) {
@@ -6646,8 +7702,8 @@ function applyMerchantItem(item) {
   switch (item.id) {
     case 'm_health':  { const h=Math.ceil(player.maxHp*0.75); player.hp=Math.min(player.maxHp,player.hp+h); spawnFloatText(player.wx,player.wy-1,`+${h}HP`,'#ff4466'); break; }
     case 'm_health_xl':{ player.hp=player.maxHp; spawnFloatText(player.wx,player.wy-1,'FULLY HEALED!','#ff4466'); break; }
-    case 'm_oil':     { oil=Math.min(maxOil(),oil+50); spawnFloatText(player.wx,player.wy-1,'+50 OIL','#ff9900'); break; }
-    case 'm_oil_xl':  { oil=maxOil(); spawnFloatText(player.wx,player.wy-1,'OIL FULL!','#ff9900'); break; }
+    case 'm_oil':     { gainOil(50); spawnFloatText(player.wx,player.wy-1,'+50 OIL','#ff9900'); break; }
+    case 'm_oil_xl':  { gainOil(maxOil()); spawnFloatText(player.wx,player.wy-1,'OIL FULL!','#ff9900'); break; }
     case 'm_bombs3':  { bombCount+=3; spawnFloatText(player.wx,player.wy-1,'+3 BOMBS','#ff8800'); break; }
     case 'm_bombs6':  { bombCount+=6; spawnFloatText(player.wx,player.wy-1,'+6 BOMBS','#ff8800'); break; }
     case 'm_bones':   { boneCount+=3; spawnFloatText(player.wx,player.wy-1,'+3 BONES','#ccbbaa'); break; }
@@ -6655,7 +7711,7 @@ function applyMerchantItem(item) {
     case 'blood_charm':{ player.bloodCharm=true; spawnFloatText(player.wx,player.wy-1,'BLOOD CHARM!','#ff2244'); setTimeout(checkSynergyDiscovery,100); break; }
     case 'seer_stone':{ revealSecretRooms(); spawnFloatText(player.wx,player.wy-1,'SECRET ROOMS REVEALED','#ffddaa'); break; }
     case 'depth_candle':{ player.depthCandleTimer=90000; spawnFloatText(player.wx,player.wy-1,'DEPTH CANDLE LIT!','#ffff44'); break; }
-    case 'iron_ration':{ player.hp=Math.min(player.maxHp,player.hp+10); oil=Math.min(maxOil(),oil+25); spawnFloatText(player.wx,player.wy-1,'+10HP +25 OIL','#88ffaa'); break; }
+    case 'iron_ration':{ player.hp=Math.min(player.maxHp,player.hp+10); gainOil(25); spawnFloatText(player.wx,player.wy-1,'+10HP +25 OIL','#88ffaa'); break; }
     case 'cursed_shard':{ player.cursedBlade=true; spawnFloatText(player.wx,player.wy-1,'CURSED BLADE!','#cc44ff'); setTimeout(checkSynergyDiscovery,100); break; }
     case 'purify_tonic':{ player.darkPatchTimer=0; player.icePatchTimer=0; spawnFloatText(player.wx,player.wy-1,'PURIFIED!','#88ffff'); break; }
     case 'gold_magnet': { player.goldMagnetTimer=120000; spawnFloatText(player.wx,player.wy-1,'GOLD MAGNET!','#ffdd44'); break; }
@@ -6667,6 +7723,9 @@ function applyMerchantItem(item) {
     case 'wraith_ward': { player.wraithWard=true; spawnFloatText(player.wx,player.wy-1,'WRAITH WARD!','#4488ff'); break; }
     case 'bone_shield': { player.boneShield=true; spawnFloatText(player.wx,player.wy-1,'BONE SHIELD!','#ccbbaa'); break; }
     case 'treasure_eye':{ player.treasureEye=true; spawnFloatText(player.wx,player.wy-1,'TREASURE EYE!','#ffddaa'); break; }
+    case 'dungeon_key':  { player.dungeonKey=true;  spawnFloatText(player.wx,player.wy-1,'DUNGEON KEY!','#ffdd44'); break; }
+    case 'gilded_flask':{ player.gildedFlask=true; spawnFloatText(player.wx,player.wy-1,'GILDED FLASK!','#ffdd44'); break; }
+    case 'vital_flask': { player.vitalFlask=true;  spawnFloatText(player.wx,player.wy-1,'VITAL FLASK!','#ff4488'); break; }
   }
   triggerFlash('#ffffff11', 200);
 }
@@ -6695,6 +7754,97 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Tab' && ghost && ghost.active) { skipGhost(); return; }
 
   // ── Start menu ──────────────────────────────────────────────
+
+  if (playgroundScreen) {
+    const settingRows = PG_SETTING_ROWS;
+    const cur = settingRows[pgCursor];
+
+    if (pgSeedTyping) {
+      // Typing mode for seed
+      if (e.key === 'Escape') { pgSeedTyping = false; pgSeedInput = ''; return; }
+      if (e.key === 'Enter') {
+        const parsed = parseInt(pgSeedInput, 10);
+        if (!isNaN(parsed) && parsed > 0) pgCfg.seed = parsed % 1000000000;
+        pgSeedTyping = false; pgSeedInput = '';
+        return;
+      }
+      if (e.key === 'Backspace') { pgSeedInput = pgSeedInput.slice(0,-1); return; }
+      if (/^[0-9]$/.test(e.key) && pgSeedInput.length < 9) { pgSeedInput += e.key; return; }
+      return;
+    }
+
+    if (e.key === 'ArrowUp'   || e.key === 'w' || e.key === 'W') {
+      pgCursor = Math.max(0, pgCursor - 1); SFX.play('menu_move');
+    } else if (e.key === 'ArrowDown'  || e.key === 's' || e.key === 'S') {
+      pgCursor = Math.min(settingRows.length - 1, pgCursor + 1); SFX.play('menu_move');
+    } else if (e.key === 'ArrowLeft'  || e.key === 'a' || e.key === 'A') {
+      if (cur && cur.type === 'seed') { pgCfg.seed = Math.floor(Math.random()*999999999); SFX.play('menu_move'); }
+      else if (cur) { pgAdjust(cur, -1); SFX.play('menu_move'); }
+    } else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') {
+      if (cur && cur.type === 'seed') { pgCfg.seed = Math.floor(Math.random()*999999999); SFX.play('menu_move'); }
+      else if (cur) { pgAdjust(cur, 1); SFX.play('menu_move'); }
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      if (cur && cur.type === 'seed') {
+        pgSeedTyping = true; pgSeedInput = ''; return;
+      }
+      // Launch run
+      SFX.play('menu_confirm');
+      playgroundScreen = false;
+      gameStarted = true; _runKills = 0;
+      applyClassAndPerks();
+      applyUpgrades();
+      // Apply curses based on config (normal = rollCurses, none = skip, guaranteed = forced)
+      if (pgCfg.curses === 1) rollCurses();
+      applyPlaygroundConfig(); // overrides after base setup
+      setTimeout(applyCurses, 600);
+      if (!tutorialDone()) setTimeout(initGhost, 1200);
+      triggerFlash('#000000', 600);
+    } else if (e.key === 'Escape') {
+      playgroundScreen = false; SFX.play('menu_move');
+    }
+    return;
+  }
+
+  if (modifierScreen) {
+    const rows2 = Math.ceil(MODIFIER_DEFS.length/2);
+    if (e.key==='ArrowLeft'||e.key==='a'||e.key==='A')  modCursor = modCursor%2===0 ? modCursor : modCursor-1;
+    if (e.key==='ArrowRight'||e.key==='d'||e.key==='D') modCursor = modCursor%2===1 ? modCursor : Math.min(MODIFIER_DEFS.length-1,modCursor+1);
+    if (e.key==='ArrowUp'||e.key==='w'||e.key==='W')    modCursor = modCursor>=2 ? modCursor-2 : modCursor;
+    if (e.key==='ArrowDown'||e.key==='s'||e.key==='S')  modCursor = modCursor+2 < MODIFIER_DEFS.length ? modCursor+2 : modCursor;
+    if (e.key==='Enter'||e.key===' ') {
+      const def = MODIFIER_DEFS[modCursor];
+      if (activeModifiers.has(def.id)) {
+        activeModifiers.delete(def.id);
+        SFX.play('menu_move');
+      } else {
+        const blocked = def.incompatible.some(id=>activeModifiers.has(id));
+        if (!blocked && activeModifiers.size < MAX_MODIFIERS) { activeModifiers.add(def.id); SFX.play('menu_confirm'); }
+        else SFX.play('hurt');
+      }
+    }
+    if (e.key==='Backspace') { activeModifiers.clear(); SFX.play('menu_move'); }
+    if (e.key==='Escape'||e.key==='r'||e.key==='R') {
+      modifierScreen = false;
+      gameStarted = true;
+      _runKills = 0;
+      applyClassAndPerks();
+      applyUpgrades();
+      rollCurses();
+      setTimeout(applyCurses, 600);
+      if (!tutorialDone()) setTimeout(initGhost, 1200);
+      if (hasMod('headstart')) { gold=300; bombCount=3; }
+      if (hasMod('iron_start')) { player.weapon='torch_weapon'; upgrades.find(u=>u.id==='torch_weapon').level=1; applyUpgrades(); }
+      if (gameMode==='story') {
+        storyAct=1; storyActsCleared=[]; storyLoreCollected=[]; victoryScreen=false;
+        const _s1=actStartTile(1); player.wx=_s1.wx; player.wy=_s1.wy;
+        player.px=player.wx*TILE; player.py=player.wy*TILE;
+        beginStoryAct(1);
+      }
+      SFX.play('menu_confirm');
+      triggerFlash('#000000', 600);
+    }
+    return;
+  }
   if (!gameStarted) {
     // Vault navigation
     if (vaultOpen) {
@@ -6704,11 +7854,11 @@ document.addEventListener('keydown', e => {
         if (vaultTab < VAULT_TABS.length - 1) { vaultTab++; vaultCursor = 0; }
       } else if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') {
         if (vaultTab === 0) vaultCursor = Math.max(0, vaultCursor - 1);
-        else if (vaultTab === 1) vaultCursor = Math.max(0, vaultCursor - 3);
+        else if (vaultTab === 1) vaultCursor = Math.max(0, vaultCursor - 1);
       } else if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') {
         const maxC = vaultTab === 0 ? 2 : Object.keys(PERK_DEFS).length - 1;
         if (vaultTab === 0) vaultCursor = Math.min(maxC, vaultCursor + 1);
-        else if (vaultTab === 1) vaultCursor = Math.min(maxC, vaultCursor + 3);
+        else if (vaultTab === 1) vaultCursor = Math.min(maxC, vaultCursor + 1);
       } else if (e.key === 'Enter' || e.key === ' ') {
         if (vaultTab === 0) {
           // Class tab — buy or select
@@ -6782,38 +7932,33 @@ document.addEventListener('keydown', e => {
     } else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') {
       startMenuCursor = startMenuCursor % 2 === 1 ? startMenuCursor : startMenuCursor + 1;
     } else if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') {
-      startMenuCursor = startMenuCursor >= 2 ? startMenuCursor - 2 : startMenuCursor;
+      if (startMenuCursor === 4) startMenuCursor = 2;
+      else if (startMenuCursor >= 2) startMenuCursor -= 2;
     } else if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') {
-      startMenuCursor = startMenuCursor <= 1 ? startMenuCursor + 2 : startMenuCursor;
+      if (startMenuCursor <= 1) startMenuCursor += 2;
+      else if (startMenuCursor <= 3) startMenuCursor = 4;
     } else if (e.key === 'Enter' || e.key === ' ') {
       SFX.play('menu_confirm');
-      gameMode = ['easy','combat','hardcore','story'][startMenuCursor];
-      gameStarted = true;
-      _runKills = 0;
-      applyClassAndPerks();
-      applyUpgrades();
-      rollCurses();
-      setTimeout(applyCurses, 600);
-      if (!tutorialDone()) setTimeout(initGhost, 1200);
-      if (gameMode === 'story') {
-        storyAct = 1;
-        storyActsCleared = [];
-        storyLoreCollected = [];
-        victoryScreen = false;
-        const _s1 = actStartTile(1);
-        player.wx = _s1.wx; player.wy = _s1.wy;
-        player.px = player.wx * TILE; player.py = player.wy * TILE;
-        beginStoryAct(1);
+      if (startMenuCursor === 4) {
+        gameMode = 'playground';
+        pgCfg = Object.assign({}, PG_DEFAULTS);
+        pgCfg.seed = Math.floor(Math.random() * 999999999);
+        pgCursor = 0; pgSeedTyping = false; pgSeedInput = '';
+        playgroundScreen = true;
+      } else {
+        gameMode = ['easy','combat','hardcore','story'][startMenuCursor];
+        activeModifiers.clear();
+        modCursor = 0;
+        if (gameMode === 'easy') {
+          gameStarted = true; _runKills = 0;
+          applyClassAndPerks(); applyUpgrades(); rollCurses();
+          setTimeout(applyCurses, 600);
+          if (!tutorialDone()) setTimeout(initGhost, 1200);
+        } else {
+          modifierScreen = true;
+        }
       }
-      loreOpen = false;
       triggerFlash('#000000', 600);
-    } else if (e.key === '?' || e.key === 'h' || e.key === 'H') {
-      loreOpen = !loreOpen; vaultOpen = false;
-    } else if (e.key === 'Escape') {
-      loreOpen = false; vaultOpen = false;
-    } else if (loreOpen) {
-      if (e.key === 'ArrowRight') { loreTab = (loreTab + 1) % LORE_TABS.length; loreScrolls[loreTab] = 0; }
-      else if (e.key === 'ArrowLeft') { loreTab = (loreTab - 1 + LORE_TABS.length) % LORE_TABS.length; loreScrolls[loreTab] = 0; }
     }
     return;
   }
@@ -6885,6 +8030,7 @@ document.addEventListener('keydown', e => {
   merchantOpen = false;
   boostInventory = [];
   boostOpen = false;
+  invTab = 0; buffCursor = 0;
     return;
   }
 
@@ -6951,8 +8097,8 @@ document.addEventListener('keydown', e => {
 
   // Z = open/close boost inventory
   if (e.key === 'z' || e.key === 'Z') {
-    boostOpen = !boostOpen;
-    shopOpen = false; loreOpen = false; merchantOpen = false; inventoryOpen = false;
+    invTab = 1; inventoryOpen = true; boostOpen = false;
+    shopOpen = false; loreOpen = false; merchantOpen = false;
     return;
   }
 
@@ -6983,6 +8129,7 @@ document.addEventListener('keydown', e => {
       merchantOpen = false;
   boostInventory = [];
   boostOpen = false;
+  invTab = 0; buffCursor = 0;
     }
     return;
   }
@@ -6990,13 +8137,27 @@ document.addEventListener('keydown', e => {
   // Inventory navigation
   if (inventoryOpen) {
     const owned = getOwnedWeapons();
-    if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
-      invCursor = (invCursor - 1 + owned.length) % owned.length;
-    } else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') {
-      invCursor = (invCursor + 1) % owned.length;
-    } else if (e.key === 'Enter' || e.key === ' ') {
-      const sel = owned[invCursor];
-      if (sel) { player.weapon = sel.id; spawnFloatText(player.wx, player.wy - 1, sel.label + ' EQUIPPED!', sel.color); }
+    const left  = e.key === 'ArrowLeft'  || e.key === 'a' || e.key === 'A';
+    const right = e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D';
+    const up    = e.key === 'ArrowUp'    || e.key === 'w' || e.key === 'W';
+    const down  = e.key === 'ArrowDown'  || e.key === 's' || e.key === 'S';
+    if (left)  invTab = Math.max(0, invTab - 1);
+    if (right) invTab = Math.min(2, invTab + 1);
+    if (invTab === 0) {
+      if (up)   invCursor = Math.max(0, invCursor - 1);
+      if (down) invCursor = Math.min(owned.length - 1, invCursor + 1);
+    }
+    if (invTab === 1) {
+      if (up)   buffCursor = Math.max(0, buffCursor - 1);
+      if (down) buffCursor = Math.min(boostInventory.length - 1, buffCursor + 1);
+    }
+    if (e.key === 'Enter' || e.key === ' ') {
+      if (invTab === 0) {
+        const sel = owned[invCursor];
+        if (sel) { player.weapon = sel.id; spawnFloatText(player.wx, player.wy-1, sel.label+' EQUIPPED!', sel.color); }
+      } else if (invTab === 1 && boostInventory.length > 0) {
+        useBoost(buffCursor);
+      }
     }
     return;
   }
@@ -7010,7 +8171,7 @@ document.addEventListener('keydown', e => {
     // V = dash
     if (e.key === 'v' || e.key === 'V') { doDash(); return; }
     // X = parry
-    if (e.key === 'x' || e.key === 'X') { doParry(); return; }
+    if (e.key === 'x' || e.key === 'X') { if (PARRY_ENABLED || (gameMode==='playground'&&pgCfg.parry)) doParry(); return; }
     // G = throw bomb
     if (e.key === 'g' || e.key === 'G') { throwBomb(); return; }
     // B = throw bone &nbsp;|&nbsp; Z = boost inventory (if you have any)
@@ -7545,6 +8706,8 @@ function drawScene(timestamp) {
   }
 
   // Floating pickup texts
+  drawAfterimages();
+  drawParticles();
   drawFloatingTexts(timestamp);
 
   // Vignette
@@ -7721,6 +8884,14 @@ function drawScene(timestamp) {
     let iconY2 = 28;
     ctx.font = '5px "Press Start 2P"';
     if (boostInventory.length > 0) { ctx.fillStyle='#44ffaa'; ctx.fillText(`[Z] BOOSTS: ${boostInventory.length}`, 8, iconY2); iconY2+=11; }
+    if (gameMode === 'playground') {
+      ctx.fillStyle = '#335533';
+      ctx.font = '5px "Press Start 2P"';
+      ctx.textAlign = 'left';
+      ctx.fillText('🔧 SEED: ' + pgCfg.seed, 8, iconY2); iconY2 += 11;
+      if (pgCfg.godMode) { ctx.fillStyle = '#44ff88'; ctx.fillText('GOD MODE', 8, iconY2); iconY2 += 11; }
+    }
+    if (floorEvent) { ctx.fillStyle=floorEvent.def.color; ctx.fillText('⚑ '+floorEvent.def.name.slice(0,14), 8, iconY2); iconY2+=11; }
     if ((player.boostDmgTimer||0)>0)   { ctx.fillStyle='#ff2200'; ctx.fillText('BERSERK!', 8, iconY2); iconY2+=11; }
     if ((player.boostSpeedTimer||0)>0) { ctx.fillStyle='#44ffaa'; ctx.fillText('HASTE!',   8, iconY2); iconY2+=11; }
     if ((player.goldMultiTimer||0)>0)  { ctx.fillStyle='#ffdd44'; ctx.fillText('3x GOLD',  8, iconY2); iconY2+=11; }
@@ -7746,6 +8917,7 @@ function drawScene(timestamp) {
     ctx.globalAlpha = 1;
   }
 
+  drawOilVignette();
   // Milestone banners
   drawBanners(timestamp);
   if (quitConfirm) drawQuitConfirm();
@@ -7850,12 +9022,50 @@ function drawBanners(timestamp) {
 }
 
 let deathStats = null;
+
+function getDeathTip(stats) {
+  const killer = (stats.killerName || '').toLowerCase();
+  const depth  = stats.depth || 0;
+  const gold   = stats.gold  || 0;
+
+  if (killer === 'the dark' || killer === 'oil' || killer.includes('oil'))
+    return 'TIP: The Oil Flask upgrade halves your drain rate. Buy it first.';
+  if (killer.includes('warden'))
+    return 'TIP: The Warden telegraphs its slam. Dash sideways when it charges.';
+  if (killer.includes('sovereign') || killer.includes('bone'))
+    return 'TIP: The Bone Sovereign fires spreads. Keep moving — never stand still.';
+  if (killer.includes('abyss'))
+    return 'TIP: The Abyss pulls you in. Stay at range and use the bow.';
+  if (killer.includes('wraith') || killer.includes('ghost'))
+    return 'TIP: Wraithes drain oil on contact. The Wraith Ward item blocks this.';
+  if (killer.includes('lava') || killer.includes('ember'))
+    return 'TIP: Lava tiles deal constant damage. Boots of Resistance reduce it.';
+  if (killer.includes('slime'))
+    return 'TIP: Slimes split on death. Kill mini-slimes fast or keep your distance.';
+  if (killer.includes('shadow'))
+    return 'TIP: Shadows teleport in the dark. Keep your torch lit.';
+  if (depth < 5)
+    return 'TIP: Upgrade your armor first — even 1 point halves early damage.';
+  if (gold > 500 && depth < 10)
+    return 'TIP: Spend your gold — you lose it all on death. The shop is your friend.';
+  if (depth > 20)
+    return 'TIP: Deep runs need oil management. Buy two Oil Flasks before depth 20.';
+  // fallbacks
+  const fallbacks = [
+    'TIP: Charged sword attacks knock enemies back. Great for crowd control.',
+    'TIP: Shrines restore 50% oil. They are always worth a detour.',
+    'TIP: The dash (V) is invincible mid-flight. Use it to escape tight spots.',
+    'TIP: Your corpse holds your gold. Find it next run to recover it.',
+  ];
+  return fallbacks[Math.floor(Math.random() * fallbacks.length)];
+}
+
 function drawDeathScreen(timestamp) {
   const age = timestamp - deathTimestamp;
   const fadeIn = Math.min(1, age / 900);
 
   ctx.save();
-  ctx.globalAlpha = fadeIn * 0.96;
+  ctx.globalAlpha = fadeIn * 0.97;
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, W, H);
   ctx.globalAlpha = fadeIn;
@@ -7866,115 +9076,148 @@ function drawDeathScreen(timestamp) {
   const isNewBestDepth = deathStats && deathStats.depth >= (best.depth || 0);
   const isNewBestKills = deathStats && (deathStats.kills||0) >= (best.kills || 0);
 
-  const pw = 560, ph = 420;
+  const pw = Math.min(W - 40, 680), ph = Math.min(H - 40, 520);
   const px = (W-pw)/2, py = (H-ph)/2;
 
-  // Panel
-  ctx.fillStyle = '#06010a';
+  // Panel bg + border
+  ctx.fillStyle = '#07010d';
   ctx.fillRect(px, py, pw, ph);
-  ctx.strokeStyle = '#880022'; ctx.lineWidth = 2;
+  ctx.strokeStyle = '#aa0022'; ctx.lineWidth = 3;
   ctx.strokeRect(px, py, pw, ph);
-  ctx.strokeStyle = '#330011'; ctx.lineWidth = 1;
-  ctx.strokeRect(px+5, py+5, pw-10, ph-10);
+  ctx.strokeStyle = '#440011'; ctx.lineWidth = 1;
+  ctx.strokeRect(px+6, py+6, pw-12, ph-12);
 
   // Corner accents
-  ctx.fillStyle = '#cc0022';
-  ctx.fillRect(px, py, 8, 2); ctx.fillRect(px, py, 2, 8);
-  ctx.fillRect(px+pw-8, py, 8, 2); ctx.fillRect(px+pw-2, py, 2, 8);
-  ctx.fillRect(px, py+ph-2, 8, 2); ctx.fillRect(px, py+ph-8, 2, 8);
-  ctx.fillRect(px+pw-8, py+ph-2, 8, 2); ctx.fillRect(px+pw-2, py+ph-8, 2, 8);
+  [[px,py],[px+pw-14,py],[px,py+ph-3],[px+pw-14,py+ph-3]].forEach(([ax,ay])=>{
+    ctx.fillStyle='#cc0022';
+    ctx.fillRect(ax,ay,14,3); ctx.fillRect(ax,ay,3,14);
+  });
+  ctx.fillRect(px,py+ph-14,3,14); ctx.fillRect(px+pw-3,py,3,14);
+  ctx.fillRect(px+pw-3,py+ph-14,3,14);
 
   // Title
   ctx.textAlign = 'center';
-  ctx.font = '14px "Press Start 2P"';
-  ctx.fillStyle = '#cc0022';
-  ctx.fillText('YOUR LIGHT WENT OUT', W/2, py + 34);
+  ctx.font = '18px "Press Start 2P"';
+  ctx.fillStyle = '#dd0022';
+  ctx.fillText('YOUR LIGHT WENT OUT', W/2, py + 42);
 
-  // Contextual death line
+  // Death subtitle
   if (deathStats) {
     const killer = deathStats.killerName || 'the dark';
     const biome  = deathStats.biome || 'the dungeon';
-    ctx.font = '6px "Press Start 2P"';
-    ctx.fillStyle = '#661122';
-    ctx.fillText('slain by ' + killer + '  \u2014  in ' + biome, W/2, py + 50);
+    ctx.font = '8px "Press Start 2P"';
+    ctx.fillStyle = '#aa4444';
+    ctx.fillText('slain by ' + killer + '   —   in ' + biome, W/2, py + 62);
+    if (gameMode === 'playground') {
+      ctx.font = '6px "Press Start 2P"'; ctx.fillStyle = '#44aa55'; ctx.textAlign = 'center';
+      ctx.fillText('SEED: ' + pgCfg.seed, W/2, statY); statY += 14;
+    }
     if (deathStats.curses) {
-      ctx.fillStyle = '#550033';
-      ctx.fillText('cursed run: ' + deathStats.curses, W/2, py + 62);
+      ctx.font = '7px "Press Start 2P"';
+      ctx.fillStyle = '#993377';
+      ctx.fillText('cursed run: ' + deathStats.curses, W/2, py + 78);
     }
   }
 
   // Divider
-  ctx.fillStyle = '#330011';
-  ctx.fillRect(px+20, py+70, pw-40, 1);
+  ctx.fillStyle = '#44001a';
+  ctx.fillRect(px+24, py+88, pw-48, 2);
 
   if (deathStats) {
-    // Two columns: THIS RUN  |  ALL TIME
-    const colL = px + 40, colR = px + pw/2 + 20;
-    let lyy = py + 86, ryy = py + 86;
+    const colL = px + 36, colR = px + pw/2 + 24;
+    const colW = pw/2 - 60;
+    let lyy = py + 108, ryy = py + 108;
 
-    ctx.font = '7px "Press Start 2P"';
-    ctx.fillStyle = '#993322'; ctx.textAlign = 'left';
+    // Column headers
+    ctx.font = '8px "Press Start 2P"';
+    ctx.fillStyle = '#cc4433'; ctx.textAlign = 'left';
     ctx.fillText('THIS RUN', colL, lyy);
-    ctx.fillStyle = '#664422';
+    ctx.fillStyle = '#886644';
     ctx.fillText('ALL TIME  (' + (best.runs||1) + ' runs)', colR, ryy);
-    lyy += 18; ryy += 18;
+    lyy += 22; ryy += 22;
 
     // Vertical divider
-    ctx.strokeStyle = '#330011'; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(px+pw/2, py+70); ctx.lineTo(px+pw/2, py+ph-50); ctx.stroke();
+    ctx.strokeStyle = '#440011'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(px+pw/2, py+88); ctx.lineTo(px+pw/2, py+ph-115); ctx.stroke();
 
     const leftStats = [
-      { label: 'DEPTH',   val: (deathStats.depth||0).toString(),               star: isNewBestDepth },
-      { label: 'KILLS',   val: (deathStats.kills||0).toString(),               star: isNewBestKills },
-      { label: 'GOLD',    val: (deathStats.gold||0).toLocaleString()+'g',       star: isNewBestGold },
-      { label: 'TILES',   val: (deathStats.tiles||0).toLocaleString(),          star: isNewBestTiles },
-      { label: 'SHRINES', val: shrinesUsed.toString(),                          star: false },
-      { label: 'VAULTS',  val: vaultsOpened.toString(),                         star: false },
+      { label:'DEPTH',   val:(deathStats.depth||0).toString(),          star:isNewBestDepth },
+      { label:'KILLS',   val:(deathStats.kills||0).toString(),          star:isNewBestKills },
+      { label:'GOLD',    val:(deathStats.gold||0).toLocaleString()+'g', star:isNewBestGold  },
+      { label:'TILES',   val:(deathStats.tiles||0).toLocaleString(),    star:isNewBestTiles },
+      { label:'SHRINES', val:shrinesUsed.toString(),                    star:false },
+      { label:'VAULTS',  val:vaultsOpened.toString(),                   star:false },
     ];
     const rightStats = [
-      { label: 'DEPTH', val: (best.depth||0).toString() },
-      { label: 'KILLS', val: (best.kills||0).toString() },
-      { label: 'GOLD',  val: (best.gold||0).toLocaleString()+'g' },
-      { label: 'TILES', val: (best.tiles||0).toLocaleString() },
+      { label:'DEPTH', val:(best.depth||0).toString() },
+      { label:'KILLS', val:(best.kills||0).toString() },
+      { label:'GOLD',  val:(best.gold||0).toLocaleString()+'g' },
+      { label:'TILES', val:(best.tiles||0).toLocaleString() },
     ];
 
     for (const s of leftStats) {
-      ctx.font = '6px "Press Start 2P"';
-      ctx.fillStyle = '#664433'; ctx.textAlign = 'left';
+      ctx.font = '8px "Press Start 2P"';
+      ctx.fillStyle = '#aa7755'; ctx.textAlign = 'left';
       ctx.fillText(s.label, colL, lyy);
-      ctx.fillStyle = s.star ? '#ffdd44' : '#ccaa77';
+      ctx.fillStyle = s.star ? '#ffdd44' : '#eeccaa';
       ctx.textAlign = 'right';
-      ctx.fillText(s.val + (s.star ? ' \u2605' : ''), colL + 190, lyy);
-      lyy += 16;
+      ctx.fillText(s.val + (s.star ? '  ★' : ''), colL + colW, lyy);
+      lyy += 22;
     }
     for (const s of rightStats) {
-      ctx.font = '6px "Press Start 2P"';
-      ctx.fillStyle = '#554433'; ctx.textAlign = 'left';
+      ctx.font = '8px "Press Start 2P"';
+      ctx.fillStyle = '#886655'; ctx.textAlign = 'left';
       ctx.fillText(s.label, colR, ryy);
-      ctx.fillStyle = '#997755';
+      ctx.fillStyle = '#ccbb99';
       ctx.textAlign = 'right';
-      ctx.fillText(s.val, colR + 180, ryy);
-      ryy += 16;
+      ctx.fillText(s.val, colR + colW, ryy);
+      ryy += 22;
     }
 
     // Echoes earned
-    const echY = py + ph - 80;
-    ctx.fillStyle = '#220033';
-    ctx.fillRect(px+20, echY-8, pw-40, 1);
+    const echY = py + ph - 114;
+    ctx.fillStyle = '#33004d';
+    ctx.fillRect(px+24, echY, pw-48, 2);
+    ctx.font = '9px "Press Start 2P"';
+    ctx.fillStyle = '#ee99ff'; ctx.textAlign = 'center';
+    ctx.fillText('◆  ' + (deathStats.echoes||0) + ' ECHOES EARNED     total: ' + META.echoes, W/2, echY + 20);
     ctx.font = '7px "Press Start 2P"';
-    ctx.fillStyle = '#cc88ff'; ctx.textAlign = 'center';
-    ctx.fillText('\u25c6 ' + (deathStats.echoes||0) + ' ECHOES EARNED  \u2014  total: ' + META.echoes, W/2, echY+10);
+    ctx.fillStyle = '#66aa55';
+    ctx.fillText('your remains lie where you fell — find them to recover your gold', W/2, echY + 38);
 
-    // Corpse line
-    ctx.font = '5px "Press Start 2P"';
-    ctx.fillStyle = '#334422';
-    ctx.fillText('your remains lie where you fell \u2014 find them to recover your gold', W/2, echY + 26);
+    // Death tip — green box, word-wrapped, large enough to read
+    if (age > 600) {
+      const tip = getDeathTip(deathStats);
+      const tipBoxY = py + ph - 68;
+      ctx.fillStyle = '#081408';
+      ctx.fillRect(px+24, tipBoxY, pw-48, 38);
+      ctx.strokeStyle = '#337733'; ctx.lineWidth = 1;
+      ctx.strokeRect(px+24, tipBoxY, pw-48, 38);
+      // word-wrap across two lines if needed
+      ctx.font = '7px "Press Start 2P"';
+      ctx.fillStyle = '#99ee88';
+      ctx.textAlign = 'center';
+      const maxW = pw - 80;
+      const words = tip.split(' ');
+      let l1 = '', l2 = '';
+      for (const w of words) {
+        const test = l1 + (l1?' ':'') + w;
+        if (ctx.measureText(test).width > maxW && l1) l2 += (l2?' ':'')+w;
+        else l1 = test;
+      }
+      if (l2) {
+        ctx.fillText(l1, W/2, tipBoxY + 14);
+        ctx.fillText(l2, W/2, tipBoxY + 28);
+      } else {
+        ctx.fillText(tip, W/2, tipBoxY + 22);
+      }
+    }
   }
 
-  // Blink prompt
+  // Restart prompt
   if (age > 1800 && Math.floor(age/500) % 2 === 0) {
-    ctx.font = '8px "Press Start 2P"';
-    ctx.fillStyle = '#ff4444'; ctx.textAlign = 'center';
+    ctx.font = '10px "Press Start 2P"';
+    ctx.fillStyle = '#ff5555'; ctx.textAlign = 'center';
     ctx.fillText('PRESS  R  TO DESCEND AGAIN', W/2, py + ph - 18);
   }
   ctx.textAlign = 'left';
@@ -8396,6 +9639,219 @@ function drawVictoryScreen(timestamp) {
   ctx.textAlign = 'left';
 }
 
+// ── Floor Event System ───────────────────────────────────────────
+const FLOOR_EVENT_DEFS = [
+  { id:'horde_night',  name:'HORDE NIGHT',     color:'#ff4444',
+    desc:'Enemy spawns tripled for this biome. A great reward awaits at the other side.',
+    spawnMult: 3.0, endReward: 'gold' },
+  { id:'ransacked',    name:'MERCHANT RANSACKED', color:'#ffaa44',
+    desc:'The merchant here was driven off. A cache of supplies was left behind.',
+    noMerchant: true, spawnCache: true },
+  { id:'blessed',      name:'DIVINE BLESSING',   color:'#ffff88',
+    desc:'A god smiled on this place. One upgrade will be granted freely.',
+    freeUpgrade: true },
+  { id:'merchant_sale',name:'MERCHANT SALE',     color:'#44ffaa',
+    desc:'The merchant is selling everything at half price this floor.',
+    saleMult: 0.5 },
+  { id:'flooded',      name:'DUNGEON FLOODED',   color:'#4488ff',
+    desc:'Oil seeps through the walls. Oil drain is doubled, but flasks are plentiful.',
+    drainMult: 2.0, extraFlasks: true },
+];
+
+let floorEventSaleMult = 1.0; // referenced in upgradeCost
+
+function rollFloorEvent(biomeId) {
+  if (floorEvent) return; // already one active
+  if (Math.random() > 0.45) return; // 45% chance on each biome entry
+  const def = FLOOR_EVENT_DEFS[Math.floor(Math.random() * FLOOR_EVENT_DEFS.length)];
+  floorEvent = { id: def.id, def, biome: biomeId };
+  floorEventSaleMult = def.saleMult || 1.0;
+  banners.push({ text: '⚑ ' + def.name, color: def.color, life: 5000, maxLife: 5000 });
+  banners.push({ text: def.desc, color: def.color + 'bb', life: 5000, maxLife: 5000 });
+  SFX.play('shrine');
+  // Instant effects
+  if (def.freeUpgrade) {
+    const eligible = upgrades.filter(u => u.level < u.maxLevel);
+    if (eligible.length > 0) {
+      const upg = eligible[Math.floor(Math.random() * eligible.length)];
+      upg.level++;
+      applyUpgrades();
+      spawnFloatText(player.wx, player.wy-1, 'FREE: ' + (upg.labels?.[upg.level-1]||upg.name), '#ffff88');
+    }
+  }
+  if (def.spawnCache) {
+    // Spawn a cluster of supply objects near player
+    const dirs = [[2,0],[-2,0],[0,2],[0,-2],[1,1],[-1,-1]];
+    for (const [dx,dy] of dirs) {
+      const wx2=player.wx+dx, wy2=player.wy+dy;
+      if (!isWalkable(wx2,wy2)) continue;
+      const cx2=Math.floor(wx2/CHUNK),cy2=Math.floor(wy2/CHUNK);
+      const ch2=getChunk(cx2,cy2);
+      const lx2=((wx2%CHUNK)+CHUNK)%CHUNK, ly2=((wy2%CHUNK)+CHUNK)%CHUNK;
+      const t = Math.random();
+      ch2.objects.push({type: t<0.33?'oil_flask':t<0.66?'health_potion':'chest', lx:lx2, ly:ly2});
+    }
+    spawnFloatText(player.wx, player.wy-1, 'SUPPLIES NEARBY!', '#ffaa44');
+  }
+  floorEventEchoBonus += 10; // each floor event survived = bonus echoes
+}
+
+function endFloorEvent() {
+  if (!floorEvent) return;
+  const def = floorEvent.def;
+  // End reward
+  if (def.endReward === 'gold') {
+    const reward = 150 + Math.floor(Math.random()*150);
+    gold += reward;
+    spawnFloatText(player.wx, player.wy-1, '+'+reward+'g HORDE BONUS!', '#ffdd44');
+    banners.push({ text:'HORDE SURVIVED! +'+reward+'g', color:'#ffdd44', life:3500, maxLife:3500 });
+  }
+  floorEvent = null;
+  floorEventSaleMult = 1.0;
+}
+
+
+// ── PLAYGROUND MODE ───────────────────────────────────────────────
+let playgroundScreen = false;   // true = showing playground config
+let pgSeedTyping = false;       // true = user is typing a seed
+let pgSeedInput  = '';          // raw typed seed string
+
+const PG_DEFAULTS = {
+  hp:        2,   // index into options array
+  gold:      0,
+  bombs:     0,
+  armor:     0,
+  oilCap:    0,
+  seed:      Math.floor(Math.random() * 999999999),
+  drain:     0,   // 0=Normal 1=Half 2=Off
+  enemyStr:  1,   // 0=Weak 1=Normal 2=Hard 3=Brutal
+  enemySpawn:1,   // 0=Sparse 1=Normal 2=Dense 3=Horde
+  depth:     0,   // 0=Surface 1=25 2=50 3=100
+  curses:    1,   // 0=None 1=Normal 2=Guaranteed
+  upgrades:  0,   // 0=Default 1=All Maxed 2=All Zeroed
+  parry:     false,
+  newAttacks:true,
+  floorEvents:true,
+  godMode:   false,
+};
+let pgCfg = Object.assign({}, PG_DEFAULTS);
+let pgCursor = 0; // which row is selected
+
+const PG_ROWS = [
+  // PLAYER
+  { section:'PLAYER' },
+  { id:'hp',         label:'Starting HP',     opts:['5','10','20','40','99','∞'],          type:'cycle' },
+  { id:'gold',       label:'Starting Gold',   opts:['0','100','300','600','1500'],         type:'cycle' },
+  { id:'bombs',      label:'Starting Bombs',  opts:['0','3','6','10','∞'],                type:'cycle' },
+  { id:'armor',      label:'Armor',           opts:['0','1','2','4','8'],                 type:'cycle' },
+  { id:'oilCap',     label:'Oil Cap',         opts:['100','150','200','∞'],               type:'cycle' },
+  { id:'seed',       label:'World Seed',      opts:[],                                    type:'seed'  },
+  // WORLD
+  { section:'WORLD' },
+  { id:'drain',      label:'Oil Drain',       opts:['Normal','Half','Off'],               type:'cycle' },
+  { id:'enemyStr',   label:'Enemy Strength',  opts:['Weak','Normal','Hard','Brutal'],     type:'cycle' },
+  { id:'enemySpawn', label:'Enemy Spawns',    opts:['Sparse','Normal','Dense','Horde'],   type:'cycle' },
+  { id:'depth',      label:'Starting Depth',  opts:['Surface','Depth 25','Depth 50','Depth 100'], type:'cycle' },
+  { id:'curses',     label:'Curses',          opts:['None','Normal','Guaranteed'],        type:'cycle' },
+  { id:'upgrades',   label:'Upgrades',        opts:['Default','All Maxed','All Zeroed'],  type:'cycle' },
+  // EXPERIMENTAL
+  { section:'EXPERIMENTAL' },
+  { id:'parry',      label:'Parry System',    opts:['Off','On'],                          type:'bool'  },
+  { id:'newAttacks', label:'New Enemy Attacks',opts:['Off','On'],                         type:'bool'  },
+  { id:'floorEvents',label:'Floor Events',    opts:['Off','On'],                          type:'bool'  },
+  { id:'godMode',    label:'God Mode',        opts:['Off','On'],                          type:'bool'  },
+];
+
+// Only rows that are actual settings (not section headers)
+const PG_SETTING_ROWS = PG_ROWS.filter(r => r.id);
+
+function pgRowCycles(row) {
+  if (!row || !row.id) return;
+  const v = pgCfg[row.id];
+  if (row.type === 'bool') return v ? 1 : 0;
+  return v;
+}
+function pgValue(row) {
+  if (!row || !row.id) return '';
+  if (row.type === 'seed') return String(pgCfg.seed);
+  if (row.type === 'bool') return pgCfg[row.id] ? 'On' : 'Off';
+  return row.opts[pgCfg[row.id]] || '';
+}
+function pgAdjust(row, dir) {
+  if (!row || !row.id) return;
+  if (row.type === 'seed') {
+    pgCfg.seed = Math.floor(Math.random() * 999999999);
+    return;
+  }
+  if (row.type === 'bool') {
+    pgCfg[row.id] = !pgCfg[row.id];
+    return;
+  }
+  pgCfg[row.id] = ((pgCfg[row.id] + dir) + row.opts.length) % row.opts.length;
+}
+
+// World seed injection — call before any chunk generation
+// (_pgWorldSeed declared near getRng at top of noise system)
+function applyPlaygroundSeed() {
+  if (gameMode !== 'playground') return;
+  _pgWorldSeed = pgCfg.seed;
+  // Override noiseCache/biomeCache with seeded values by clearing and patching getRng
+  noiseCache.clear();
+  biomeCache.clear();
+  chunks.clear();
+  spawnedChunks.clear();
+}
+
+// getRng is defined near the noise system and already handles playground seed via _pgWorldSeed
+
+function applyPlaygroundConfig() {
+  // HP
+  const hpOpts = [5,10,20,40,99,Infinity];
+  const hpVal = hpOpts[pgCfg.hp] || 20;
+  player.maxHp = hpVal === Infinity ? 9999 : hpVal;
+  player.hp = player.maxHp;
+  // Gold
+  const goldOpts = [0,100,300,600,1500];
+  gold = goldOpts[pgCfg.gold] || 0;
+  // Bombs
+  const bombOpts = [0,3,6,10,Infinity];
+  bombCount = bombOpts[pgCfg.bombs] === Infinity ? 999 : (bombOpts[pgCfg.bombs] || 0);
+  player._infiniteBombs = bombOpts[pgCfg.bombs] === Infinity;
+  // Armor
+  const armorOpts = [0,1,2,4,8];
+  player.armor = armorOpts[pgCfg.armor] || 0;
+  // Upgrades
+  if (pgCfg.upgrades === 1) upgrades.forEach(u => { u.level = u.maxLevel; });
+  if (pgCfg.upgrades === 2) upgrades.forEach(u => { u.level = 0; });
+  applyUpgrades(); // re-apply after upgrade change
+  // Oil cap stored as override
+  const oilCapOpts = [100,150,200,Infinity];
+  player._pgOilCap = oilCapOpts[pgCfg.oilCap];
+  // Curses
+  if (pgCfg.curses === 0) { activeCurses = []; curseEchoMultiplier = 1; }
+  else if (pgCfg.curses === 2) {
+    // Force a random curse
+    const allCurses = CURSE_DEFS.map(d=>d.id);
+    activeCurses = [allCurses[Math.floor(Math.random()*allCurses.length)]];
+    setTimeout(applyCurses, 600);
+  }
+  // Seed
+  applyPlaygroundSeed();
+  // Starting depth — teleport player
+  const depthDist = [0,25,50,100][pgCfg.depth] || 0;
+  if (depthDist > 0) {
+    player.wx = depthDist * 5;
+    player.wy = depthDist * 5;
+    player.px = player.wx * TILE;
+    player.py = player.wy * TILE;
+  }
+}
+
+function pgOilMax() {
+  if (gameMode === 'playground' && player._pgOilCap === Infinity) return 99999;
+  return maxOil();
+}
+
 function resetRun() {
   // Reset run state — but keep corpse in the world
   oil = maxOil();
@@ -8423,11 +9879,21 @@ function resetRun() {
   }
   player.px = player.wx * TILE;
   player.py = player.wy * TILE;
-  // Biome ambience
+  // Biome ambience + floor event detection
   if (gameStarted && !isDead && !storyCutscene && !victoryScreen) {
     const _bpcx = Math.floor(player.wx/CHUNK), _bpcy = Math.floor(player.wy/CHUNK);
     const _curBiome = getChunkBiome(_bpcx, _bpcy);
     SFX.setAmbience(_curBiome.id);
+    // Detect biome transition -> roll floor event
+    if (lastFloorBiome && lastFloorBiome !== _curBiome.id && gameMode !== 'easy') {
+      if (gameMode !== 'playground' || pgCfg.floorEvents) rollFloorEvent(_curBiome.id);
+    }
+    lastFloorBiome = _curBiome.id;
+    // Tick floor event duration
+    if (floorEvent && floorEvent.biome !== _curBiome.id) {
+      // Left the biome the event was in — end it
+      endFloorEvent();
+    }
   }
 
   markVisible();
@@ -8444,6 +9910,9 @@ function resetRun() {
   player.dashCooldown = 0;
   player.dashDuration = 0;
   player.parryCooldown = 0;
+  player.parryWindow = 0;
+  player.parryWindowMax = 400;
+  player.parryDir = { dx: 1, dy: 0 };
   player.parryWindow = 0;
   player.bowCooldown = 0;
   player.regenTimer = 0;
@@ -8466,6 +9935,12 @@ function resetRun() {
   player.wraithWard = false;
   player.boneShield = false;
   player.treasureEye = false;
+  player.gildedFlask = false;
+  player.vitalFlask = false;
+  player.dungeonKey = false;
+  player.boostInvTimer = 0;
+  player.boostGold3xTimer = 0;
+  player.burning = 0;
   player.darkPatchTimer = 0;
   player.icePatchTimer = 0;
   isDead = false;
@@ -8475,6 +9950,7 @@ function resetRun() {
   merchantOpen = false;
   boostInventory = [];
   boostOpen = false;
+  invTab = 0; buffCursor = 0;
   shakeAmt = 0;
 
   SFX.stopAmbience();
@@ -8483,6 +9959,10 @@ function resetRun() {
   pursuer = null;
   _runKills = 0;
   discoveredSynergies = new Set();
+  floorEvent = null;
+  floorEventSaleMult = 1.0;
+  lastFloorBiome = null;
+  floorEventEchoBonus = 0;
   ghost = null;
   MUSIC.stop();
   player.phaseTimer = 0;
@@ -8495,6 +9975,9 @@ function resetRun() {
   storyCompass = false;
   victoryScreen = false;
   storyLoreCollected = [];
+  modifierScreen = false;
+  playgroundScreen = false;
+  activeModifiers.clear();
   // Return to start menu so player can pick mode again
   gameStarted = false;
 }
@@ -9320,7 +10803,7 @@ function breakSecretWall(scx, scy, slx, sly, swx, swy) {
 function tryMove(dx, dy) {
   const nx = player.wx + dx;
   const ny = player.wy + dy;
-  // Secret wall: only charged sword can break it
+  // Secret wall: any weapon breaks it (hardcore: needs dungeon key)
   const destTile = getTile(nx, ny);
   if (destTile === T.SECRET_WALL) return false; // blocked — use sword to break
 
@@ -9355,7 +10838,9 @@ function tryMove(dx, dy) {
           } else {
             isDead = true; deathTimestamp = Date.now();
             const dep = Math.round(Math.sqrt(player.wx**2+player.wy**2)/5);
-            deathStats = { tiles: exploredCount, gold, depth: dep };
+            const _lavEchoes = endRunMeta({ depth:dep, gold, kills:_runKills, actsCleared:storyActsCleared.length, mode:gameMode, survived:false, cursedMultiplier:curseEchoMultiplier });
+            setTimeout(()=>banners.push({text:`+${_lavEchoes} ECHOES EARNED`,color:'#cc88ff',life:3000,maxLife:3000}),2000);
+            deathStats = { tiles: exploredCount, gold, depth: dep, killerName: 'lava', biome: 'lava', curses: activeCurses.length>0?activeCurses.join(','):null, mode: gameMode, echoes: _lavEchoes };
             saveBest(deathStats);
             corpse = { wx: player.wx, wy: player.wy, gold, tiles: exploredCount, depth: dep, oil: maxOil(), upgradeLevels: upgrades.map(u=>u.level), weapon: player.weapon, bombs: bombCount, bloodCharm: player.bloodCharm, cursedBlade: player.cursedBlade, voidCloaks: player.voidCloaks, expires: gameMode === 'hardcore' ? Date.now() + 90000 : null };
             triggerFlash('#000000', 1200);
@@ -9383,7 +10868,8 @@ function tryMove(dx, dy) {
         for (let s = 0; s < count; s++) {
           const ex = nx + (rngP()>0.5?1:-1)*(1+Math.floor(rngP()*2));
           const ey = ny + (rngP()>0.5?1:-1)*(1+Math.floor(rngP()*2));
-          if (isWalkable(ex,ey)) enemies.push({type:Object.keys(ENEMY_TYPES)[0], def:eDef, wx:ex, wy:ey, hp:eDef.hp, maxHp:eDef.hp, moveTimer:200, hitFlash:0, spawnChunk:`${pcx},${pcy}`});
+          const _ppType = validDefs ? validDefs[0] : Object.keys(ENEMY_TYPES)[0];
+          if (isWalkable(ex,ey)) enemies.push({type:_ppType, def:eDef, wx:ex, wy:ey, hp:eDef.hp, maxHp:eDef.hp, moveTimer:200, hitFlash:0, spawnChunk:`${pcx},${pcy}`});
         }
         triggerShake(5, 400);
         triggerFlash('#ff440033', 300);
@@ -9396,6 +10882,11 @@ function tryMove(dx, dy) {
 }
 
 function markVisible() {
+  // Blind curse: only reveal the tile underfoot, not a full radius
+  if (hasCurse('blind')) {
+    explored.add(`${player.wx},${player.wy}`);
+    return;
+  }
   const range = player.lightRadius;
   for (let dy = -range; dy <= range; dy++) {
     for (let dx = -range; dx <= range; dx++) {
@@ -9418,6 +10909,20 @@ function loop(timestamp) {
   const dt = Math.min(timestamp - lastTime, 100);
   lastTime = timestamp;
   torchTime = timestamp;
+
+  // ── Modifier screen ─────────────────────────────────────────
+  if (playgroundScreen) {
+    ctx.clearRect(0, 0, W, H);
+    drawPlaygroundScreen(timestamp);
+    requestAnimationFrame(loop);
+    return;
+  }
+  if (modifierScreen) {
+    ctx.clearRect(0, 0, W, H);
+    drawModifierScreen(timestamp);
+    requestAnimationFrame(loop);
+    return;
+  }
 
   // ── Start menu ──────────────────────────────────────────────
   if (!gameStarted) {
@@ -9444,6 +10949,9 @@ function loop(timestamp) {
     requestAnimationFrame(loop);
     return;
   }
+
+  // Hit-stop — freeze all simulation
+  if (hitStopTimer > 0) { hitStopTimer -= dt; drawScene(timestamp); requestAnimationFrame(loop); return; }
 
   // Tick screenshake
   if (shakeTimer > 0) {
@@ -9484,11 +10992,17 @@ function loop(timestamp) {
         else if (Math.floor(Date.now()/150)%3===0) SFX.play('step');
         tryCollect(player.wx, player.wy);
         // Drain oil per step
-        const drainAmt = gameMode === 'story' ? OIL_DRAIN_PER_STEP * 0.4 : (player.oilFilterTimer||0) > 0 ? OIL_DRAIN_PER_STEP * 0.5 : OIL_DRAIN_PER_STEP;
+        const _drainUpgMult = 1 - getUpgradeValue('oildrain') * 0.10; // 10/20/30% reduction
+        const _floodDrain = (floorEvent && floorEvent.id === 'flooded') ? 2.0 : 1.0;
+        const _modDrain = hasMod('oil_miser') ? 2.0 : 1.0;
+        const _baseDrain = hasCurse('lightless') ? OIL_DRAIN_PER_STEP * 3 : OIL_DRAIN_PER_STEP;
+        const drainAmt = gameMode === 'story' ? _baseDrain * 0.4
+          : (player.oilFilterTimer||0) > 0 ? _baseDrain * _modDrain * _drainUpgMult * 0.5
+          : _baseDrain * _modDrain * _floodDrain * _drainUpgMult;
         oil = Math.max(0, oil - drainAmt);
         // HP regen: 1 HP per 40 steps
         player.regenTimer = (player.regenTimer || 0) + 1;
-        if (player.regenTimer >= 40) {
+        if (player.regenTimer >= (player.regenInterval || 40)) {
           player.regenTimer = 0;
           if (player.hp < player.maxHp) {
             player.hp = Math.min(player.maxHp, player.hp + 1);
@@ -9499,7 +11013,9 @@ function loop(timestamp) {
           isDead = true;
           deathTimestamp = timestamp;
           const depth2 = Math.round(Math.sqrt(player.wx**2+player.wy**2)/5);
-          deathStats = { tiles: exploredCount, gold, depth: depth2 };
+          const _oilEchoes = endRunMeta({ depth:depth2, gold, kills:_runKills, actsCleared:storyActsCleared.length, mode:gameMode, survived:false, cursedMultiplier:curseEchoMultiplier });
+          setTimeout(()=>banners.push({text:`+${_oilEchoes} ECHOES EARNED`,color:'#cc88ff',life:3000,maxLife:3000}),2000);
+          deathStats = { tiles: exploredCount, gold, depth: depth2, killerName: 'oil', biome: null, curses: activeCurses.length>0?activeCurses.join(','):null, mode: gameMode, echoes: _oilEchoes };
           saveBest(deathStats);
           corpse = { wx: player.wx, wy: player.wy, gold, tiles: exploredCount, depth: depth2, oil: maxOil(), upgradeLevels: upgrades.map(u => u.level), weapon: player.weapon, bombs: bombCount, bloodCharm: player.bloodCharm, cursedBlade: player.cursedBlade, voidCloaks: player.voidCloaks, expires: gameMode === 'hardcore' ? Date.now() + 90000 : null };
           triggerFlash('#000000', 1200);
@@ -9533,7 +11049,7 @@ function loop(timestamp) {
     banners.push({text:'YOUR REMAINS CRUMBLED...', color:'#884444', life:3500, maxLife:3500});
   }
 
-  if (!shopOpen && !loreOpen && !inventoryOpen && !merchantOpen && !boostOpen && !storyCutscene && !victoryScreen && gameMode !== 'easy') {
+  if (!shopOpen && !loreOpen && !inventoryOpen && !merchantOpen && !boostOpen && !storyCutscene && !victoryScreen && !quitConfirm && gameMode !== 'easy') {
     checkStoryBossSpawn();
     tickEnemies(dt, timestamp);
     tickGroundPound(dt);
@@ -9541,6 +11057,9 @@ function loop(timestamp) {
   }
   tickPursuer(dt);
   tickGhost(dt);
+  checkEventTrigger();
+  tickParticles(dt);
+  for (let i = afterimages.length-1; i >= 0; i--) { afterimages[i].life -= dt; if (afterimages[i].life <= 0) afterimages.splice(i,1); }
   // Update music state
   if (MUSIC.running) {
     if (isDead) {
@@ -9554,12 +11073,17 @@ function loop(timestamp) {
     }
   }
 
-  // Apply oil to light radius (shrinks when low)
+  // Apply oil, blind debuff, and blind curse to light radius
   if (!isDead) {
-    const baseRadius = 7 + getUpgradeValue('light') * 2;
-    player.lightRadius = oil < maxOil() * 0.2
-      ? baseRadius * (0.3 + (oil/20) * 0.7)
+    const baseRadius = 7 + getUpgradeValue('light') * 2 + (player._classLightBonus||0) + (hasPerk('echo_sight')?1:0);
+    let r = oil < maxOil() * 0.2
+      ? baseRadius * (0.3 + (oil / (maxOil()*0.2)) * 0.7)
       : baseRadius;
+    // Blind debuff (from dark patches / enemies): shrink to 2 tiles
+    if ((player.darkPatchTimer||0) > 0) r = Math.min(r, 2);
+    // Blind curse: shrink to 1.5 tiles
+    if (hasCurse('blind')) r = Math.min(r, 1.5);
+    player.lightRadius = r;
   }
 
   // Smooth pixel movement
@@ -9570,11 +11094,21 @@ function loop(timestamp) {
   if (Math.abs(player.px - targetPx) < 0.5) player.px = targetPx;
   if (Math.abs(player.py - targetPy) < 0.5) player.py = targetPy;
 
-  // Biome ambience
+  // Biome ambience + floor event detection
   if (gameStarted && !isDead && !storyCutscene && !victoryScreen) {
     const _bpcx = Math.floor(player.wx/CHUNK), _bpcy = Math.floor(player.wy/CHUNK);
     const _curBiome = getChunkBiome(_bpcx, _bpcy);
     SFX.setAmbience(_curBiome.id);
+    // Detect biome transition -> roll floor event
+    if (lastFloorBiome && lastFloorBiome !== _curBiome.id && gameMode !== 'easy') {
+      if (gameMode !== 'playground' || pgCfg.floorEvents) rollFloorEvent(_curBiome.id);
+    }
+    lastFloorBiome = _curBiome.id;
+    // Tick floor event duration
+    if (floorEvent && floorEvent.biome !== _curBiome.id) {
+      // Left the biome the event was in — end it
+      endFloorEvent();
+    }
   }
 
   markVisible();
@@ -9715,7 +11249,7 @@ tzRight.addEventListener('touchend', e => {
           doDash();
         } else {
           // Swipe left = parry
-          doParry();
+          if (PARRY_ENABLED) doParry();
         }
       } else {
         // Vertical swipe
