@@ -9,44 +9,51 @@
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
-  body {
+  html, body {
+    width: 100%; height: 100%;
     background: #000;
+    overflow: hidden;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    min-height: 100vh;
     font-family: 'Press Start 2P', monospace;
-    overflow: hidden;
   }
 
   #title {
     color: #ff9900;
     font-size: 11px;
     letter-spacing: 4px;
-    margin-bottom: 10px;
+    margin-bottom: 6px;
     text-shadow: 0 0 10px #ff6600, 0 0 20px #ff3300;
     animation: flicker 4s infinite;
+    flex-shrink: 0;
   }
 
+  /* game-wrapper contains canvas + hud, sized by JS */
   #game-wrapper {
     position: relative;
     border: 3px solid #ff9900;
     border-bottom: none;
-    box-shadow: 0 0 20px #ff6600, 0 0 60px #ff330033, inset 0 0 30px #00000088;
+    box-shadow: 0 0 20px #ff6600, 0 0 60px #ff330033;
+    flex-shrink: 0;
   }
 
   #canvas-wrapper {
     position: relative;
-    display: block;
+    overflow: hidden;
+    flex-shrink: 0;
+    line-height: 0;
   }
 
   canvas#game {
     display: block;
     image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    transform-origin: top left;
   }
 
-  /* CRT overlay — only over the canvas, not the HUD */
+  /* CRT overlay */
   #crt {
     position: absolute;
     top: 0; left: 0; right: 0; bottom: 0;
@@ -64,29 +71,31 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    width: 100%;
     color: #ff9900;
-    font-size: 6px;
-    padding: 6px 10px;
+    font-size: 11px;
+    padding: 4px 10px;
     background: #0a0500;
     border: 2px solid #ff6600;
-    border-top: 2px solid #ff6600;
+    border-top: none;
     letter-spacing: 1px;
-    /* prevent layout shift from text changes */
     white-space: nowrap;
+    font-family: 'Press Start 2P', monospace;
+    box-sizing: border-box;
   }
 
   #hud span {
     display: inline-block;
-    min-width: 80px;
+    min-width: 0;
+    font-size: inherit;
   }
 
   #controls {
     color: #664400;
     font-size: 5px;
-    margin-top: 8px;
+    margin-top: 6px;
     letter-spacing: 1px;
     text-align: center;
+    flex-shrink: 0;
   }
 
   @keyframes flicker {
@@ -161,15 +170,15 @@
     </div>
 
   </div>
-  <div id="hud">
-    <span id="hud-pos">X:0 Y:0</span>
-    <span id="hud-explored">TILES: 0</span>
-    <span id="hud-pixels">PIXELS MAPPED: 0</span>
-    <span id="hud-gold" style="color:#ffdd44;text-shadow:0 0 8px #ffaa00">GOLD: 0</span>
-    <span id="hud-oil" style="color:#ff8800">OIL: 100%</span>
-    <span id="hud-biome" style="color:#aabbff">DUNGEON</span>
-    <span id="hud-depth">DEPTH: 0</span>
-  </div>
+</div>
+<div id="hud">
+  <span id="hud-pos">—</span>
+  <span id="hud-explored">—</span>
+  <span id="hud-pixels">—</span>
+  <span id="hud-gold" style="color:#ffdd44;text-shadow:0 0 8px #ffaa00">—</span>
+  <span id="hud-oil" style="color:#ff8800">—</span>
+  <span id="hud-biome" style="color:#aabbff">—</span>
+  <span id="hud-depth">—</span>
 </div>
 <div id="controls">WASD — MOVE &nbsp;|&nbsp; SHIFT — SPRINT &nbsp;|&nbsp; SPACE (hold=charge) — ATTACK &nbsp;|&nbsp; V — DASH &nbsp;|&nbsp; F — POUND &nbsp;|&nbsp; G — BOMB &nbsp;|&nbsp; Q — BOW &nbsp;|&nbsp; 1/2/3 — WEAPON &nbsp;|&nbsp; I — INVENTORY &nbsp;|&nbsp; Z — BOOSTS &nbsp;|&nbsp; E — SHOP &nbsp;|&nbsp; ? — HELP</div>
 
@@ -756,6 +765,13 @@ const CLASS_DEFS = {
     stats:{hp:8,armor:0,oilMult:0.7,dashCooldown:0,lightBonus:-2},
     startWeapon:'sword',
     lore:'Born in the deep. Light is not safety. Light is exposure.' },
+  void: { id:'void', name:'▓▓▓▓', color:'#ffffff', cost:0,
+    desc:'All weapons unlocked. Oil drains 5x faster. Every step costs 1 HP. Light radius 3.',
+    stats:{hp:8,armor:0,oilMult:5.0,dashCooldown:0,lightBonus:-4},
+    startWeapon:'sword',
+    secret: true,
+    lore:'It came back from somewhere it should not have. Now it walks. Now it bleeds.',
+    voidClass: true },
 };
 
 const PERK_DEFS = {
@@ -799,6 +815,11 @@ function applyClassAndPerks() {
   if (hasPerk('void_walker'))  player.voidCloaks = 1;
   if (hasPerk('cursed_blade_perk')) player.cursedBlade = true;
   if (hasPerk('echo_sight'))   player.lightRadius += 1;
+  // Void class: unlock all weapons at level 1
+  if (cls.voidClass) {
+    upgrades.forEach(u => { if (['torch_weapon','bow','bomb'].includes(u.id)) u.level = Math.max(1, u.level); });
+    bombCount = Math.max(bombCount, 5);
+  }
   if (hasPerk('second_wind'))  { player._secondWind = true; player._secondWindUsed = false; }
   else { player._secondWind = false; player._secondWindUsed = false; }
 }
@@ -827,6 +848,257 @@ function rollCurses() {
   curseEchoMultiplier = picked.echoMult;
   if (hasPerk('cursed_blood')) curseEchoMultiplier *= 1.25;
 }
+
+// ── Konami Code ──────────────────────────────────────────────────
+
+// ── Accessibility Settings ────────────────────────────────────────
+const A11Y_KEY = 'DELVE_A11Y_v1';
+const A11Y_DEFAULTS = {
+  textScale:    1,    // index: 0=0.8x 1=1x 2=1.2x 3=1.5x 4=2x
+  hudSize:      1,    // index: 0=Small 1=Medium 2=Large
+  floatText:    true,
+  bannerSpeed:  0,    // index: 0=Normal 1=Slow 2=Very Slow
+  highContrast: false,
+  screenshake:  true,
+};
+// Committed = what the game actually uses
+let A11Y = Object.assign({}, A11Y_DEFAULTS);
+// Pending = what the menu is previewing (copied on open, committed on confirm)
+let A11Y_pending = Object.assign({}, A11Y_DEFAULTS);
+
+const A11Y_TEXT_SCALES  = [0.8, 1.0, 1.2, 1.5, 2.0];
+const A11Y_TEXT_LABELS  = ['0.8x','1x','1.2x','1.5x','2x'];
+const A11Y_HUD_LABELS   = ['Small','Medium','Large'];
+const A11Y_BANNER_LABELS= ['Normal','Slow','Very Slow'];
+const A11Y_BANNER_MULTS = [1.0, 1.8, 3.0];
+
+function a11yLoad() {
+  try {
+    const saved = localStorage.getItem(A11Y_KEY);
+    if (saved) A11Y = Object.assign({}, A11Y_DEFAULTS, JSON.parse(saved));
+    A11Y_pending = Object.assign({}, A11Y);
+  } catch(e) {}
+  applyA11YHUD();
+}
+function a11ySave() {
+  try { localStorage.setItem(A11Y_KEY, JSON.stringify(A11Y)); } catch(e) {}
+}
+function applyA11YHUD() {
+  const hud = document.getElementById('hud');
+  if (!hud) return;
+  const sizes = ['9px','11px','14px'];
+  const pads  = ['3px 8px','4px 10px','6px 14px'];
+  const idx = A11Y.hudSize;
+  hud.style.fontSize = sizes[idx] || sizes[1];
+  hud.style.padding  = pads[idx]  || pads[1];
+  resizeGame();
+}
+function updateHUDVisibility() {
+  // HUD always visible — shows dashes when not in game, data when playing
+  // This keeps layout stable and avoids resize jumps
+}
+
+// fs() — scaled font string. Use instead of hardcoded px in ctx.font
+function fs(px, pending, cap) {
+  const scale = A11Y_TEXT_SCALES[pending ? A11Y_pending.textScale : A11Y.textScale] || 1;
+  const effectiveScale = cap ? Math.min(scale, cap) : scale;
+  return Math.max(4, Math.round(px * effectiveScale)) + 'px "Press Start 2P"';
+}
+
+// Capped version for menus/panels with fixed dimensions — max 1.2x
+function fsc(px, pending) { return fs(px, pending, 1.2); }
+
+// Accessibility menu state
+let a11yOpen = false;
+let a11yCursor = 0;
+
+const A11Y_ROWS = [
+  { id:'textScale',   label:'Text Scale',      opts: A11Y_TEXT_LABELS,   type:'cycle' },
+  { id:'hudSize',     label:'HUD Size',         opts: A11Y_HUD_LABELS,    type:'cycle' },
+  { id:'floatText',   label:'Floating Text',    opts:['Off','On'],        type:'bool'  },
+  { id:'bannerSpeed', label:'Banner Duration',  opts: A11Y_BANNER_LABELS, type:'cycle' },
+  { id:'highContrast',label:'High Contrast',    opts:['Off','On'],        type:'bool'  },
+  { id:'screenshake', label:'Screenshake',      opts:['Off','On'],        type:'bool'  },
+];
+
+function a11yValue(row, usePending) {
+  const src = usePending ? A11Y_pending : A11Y;
+  if (row.type === 'bool') return src[row.id] ? 'On' : 'Off';
+  return row.opts[src[row.id]] || '';
+}
+function a11yAdjust(row, dir) {
+  if (row.type === 'bool') {
+    A11Y_pending[row.id] = !A11Y_pending[row.id];
+  } else {
+    A11Y_pending[row.id] = ((A11Y_pending[row.id] + dir) + row.opts.length) % row.opts.length;
+  }
+}
+function a11yCommit() {
+  A11Y = Object.assign({}, A11Y_pending);
+  a11ySave();
+  applyA11YHUD();
+}
+function a11yCancel() {
+  A11Y_pending = Object.assign({}, A11Y);
+}
+
+// ── Herzlich Code System ─────────────────────────────────────────
+// HERZLICH anywhere → opens credits screen
+// CLAUDE typed inside credits → unlocks Void class
+
+const HERZLICH_SEQ = ['h','e','r','z','l','i','c','h'];
+const CLAUDE_SEQ   = ['c','l','a','u','d','e'];
+let _hIdx = 0;  // herzlich progress
+let _cIdx = 0;  // claude progress (only active inside credits)
+let creditsOpen = false;
+let _creditsCaelShown = false; // one-time Cael teaser, ever
+
+function checkHerzlich(key) {
+  const k = key.toLowerCase();
+  // Only track letters in our sequences — ignore everything else
+  if (!'herzlicdauo'.includes(k)) return;
+
+  // If credits are open, check for CLAUDE
+  if (creditsOpen) {
+    if (k === CLAUDE_SEQ[_cIdx]) {
+      _cIdx++;
+      if (_cIdx === CLAUDE_SEQ.length) {
+        _cIdx = 0;
+        triggerVoidUnlock();
+      }
+    } else {
+      _cIdx = k === CLAUDE_SEQ[0] ? 1 : 0;
+    }
+    return;
+  }
+
+  // Otherwise check for HERZLICH
+  if (k === HERZLICH_SEQ[_hIdx]) {
+    _hIdx++;
+    if (_hIdx === HERZLICH_SEQ.length) {
+      _hIdx = 0;
+      creditsOpen = true;
+      _cIdx = 0;
+      SFX.play('menu_confirm');
+      triggerFlash('#000000', 400);
+    }
+  } else {
+    _hIdx = k === HERZLICH_SEQ[0] ? 1 : 0;
+  }
+}
+
+function triggerVoidUnlock() {
+  if (!META.unlockedClasses.includes('void')) {
+    META.unlockedClasses.push('void');
+    metaSave();
+    triggerFlash('#ffffff', 800);
+    SFX.play('boss_die');
+    setTimeout(() => {
+      creditsOpen = false;
+      banners.push({ text:'░ THE VOID UNLOCKED ░', color:'#ffffff', life:5000, maxLife:5000 });
+      banners.push({ text:'select it in the vault', color:'#888888', life:4000, maxLife:4000 });
+    }, 600);
+  } else {
+    creditsOpen = false;
+    banners.push({ text:'THE VOID ALREADY WALKS', color:'#ffffff', life:2500, maxLife:2500 });
+  }
+  // One-time Cael teaser
+  if (!_creditsCaelShown) {
+    _creditsCaelShown = true;
+    setTimeout(() => triggerCaelTeaser(), creditsOpen ? 3500 : 1000);
+  }
+}
+
+function triggerCaelTeaser() {
+  triggerFlash('#000033', 400);
+  SFX.play('shadow_teleport');
+  const _cx = player.wx + (Math.random() < 0.5 ? 3 : -3);
+  spawnFloatText(_cx, player.wy - 2, 'CAEL', '#aaddff');
+  setTimeout(() => {
+    banners.push({ text:'"you found me."',            color:'#aaddff', life:4000, maxLife:4000 });
+    setTimeout(() => banners.push({ text:'"that means you\'re ready."', color:'#aaddff', life:4000, maxLife:4000 }), 1500);
+    setTimeout(() => banners.push({ text:'"go deeper."',               color:'#667799', life:4000, maxLife:4000 }), 3000);
+  }, 500);
+}
+
+function drawCreditsScreen(timestamp) {
+  // Dark overlay
+  ctx.fillStyle = 'rgba(0,0,0,0.92)';
+  ctx.fillRect(0, 0, W, H);
+
+  const cx2 = W/2;
+  let ty = H/2 - 100;
+  const pulse = 0.7 + Math.sin(timestamp * 0.002) * 0.3;
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.font = fsc(7);
+  ctx.fillStyle = `rgba(100,150,100,${0.4 * pulse})`;
+  ctx.fillText('∞  D E L V E  ∞', cx2, ty); ty += 26;
+
+  // Dev name
+  ctx.font = fsc(14);
+  ctx.shadowColor = '#44ff66'; ctx.shadowBlur = 16 * pulse;
+  ctx.fillStyle = '#66ff88';
+  ctx.fillText('CAEL LEV', cx2, ty); ty += 30;
+  ctx.shadowBlur = 0;
+
+  // Divider
+  ctx.strokeStyle = '#224422'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(cx2-120, ty); ctx.lineTo(cx2+120, ty); ctx.stroke();
+  ty += 18;
+
+  // Credits rows
+  const rows = [
+    { label:'DESIGN & CODE', value:'Cael Lev',      vc:'#aaffaa' },
+    { label:'ASSISTED BY',   value:'Claude (Anthropic)', vc:'#ff9966' },
+    { label:'ENGINE',        value:'HTML5 Canvas',  vc:'#aaaaff' },
+    { label:'FONT',          value:'Press Start 2P',vc:'#aaaaaa' },
+  ];
+  for (const row of rows) {
+    ctx.font = fsc(5);
+    ctx.fillStyle = '#335533'; ctx.textAlign = 'left';
+    ctx.fillText(row.label, cx2 - 140, ty);
+    ctx.fillStyle = row.vc; ctx.textAlign = 'right';
+    ctx.fillText(row.value, cx2 + 140, ty);
+    ty += 16;
+  }
+
+  ty += 10;
+  ctx.strokeStyle = '#224422';
+  ctx.beginPath(); ctx.moveTo(cx2-120, ty); ctx.lineTo(cx2+120, ty); ctx.stroke();
+  ty += 18;
+
+  // Tagline
+  ctx.font = fsc(5);
+  ctx.fillStyle = '#446644'; ctx.textAlign = 'center';
+  ctx.fillText('the dungeon has no edge. keep walking.', cx2, ty); ty += 20;
+
+  // Void hint — subtle, only if not yet unlocked
+  if (!META.unlockedClasses.includes('void')) {
+    ctx.font = fsc(5);
+    ctx.fillStyle = `rgba(40,40,40,${0.5 + pulse * 0.3})`;
+    ctx.fillText('...', cx2, ty); ty += 14;
+  } else {
+    ctx.font = fsc(5);
+    ctx.fillStyle = `rgba(255,255,255,${0.3 * pulse})`;
+    ctx.fillText('▓▓▓▓', cx2, ty); ty += 14;
+  }
+
+  // Dismiss hint
+  ctx.font = fsc(5);
+  ctx.fillStyle = '#334433';
+  ctx.fillText('press ESC to close', cx2, H/2 + 110);
+
+  // CLAUDE typing progress indicator — subtle dots
+  if (_cIdx > 0) {
+    ctx.fillStyle = '#335533';
+    ctx.fillText('·'.repeat(_cIdx), cx2, H/2 + 124);
+  }
+}
+
+
+
 function hasCurse(id) { return activeCurses.includes(id); }
 
 // ── Curse popup state ─────────────────────────────────────
@@ -845,7 +1117,7 @@ function drawCursePopup(timestamp) {
   const innerW = pw - 48;
 
   // Pre-measure description word-wrap to get dynamic height
-  ctx.font = '6px "Press Start 2P"';
+  ctx.font = fsc(6);
   const descWords = def.desc.split(' ');
   const descLines = [];
   let dline = '';
@@ -880,12 +1152,12 @@ function drawCursePopup(timestamp) {
   ctx.textAlign = 'center';
 
   // Header
-  ctx.font = '7px "Press Start 2P"';
+  ctx.font = fsc(7);
   ctx.fillStyle = `rgba(180,0,40,${alpha})`;
   ctx.fillText('☠  CURSED RUN  ☠', W/2, cy2); cy2 += 22;
 
   // Curse name
-  ctx.font = '9px "Press Start 2P"';
+  ctx.font = fsc(9);
   ctx.fillStyle = `rgba(${hexToRgb(def.color)},${alpha})`;
   ctx.fillText(def.name, W/2, cy2); cy2 += 14;
 
@@ -895,7 +1167,7 @@ function drawCursePopup(timestamp) {
   cy2 += 13;
 
   // Description lines
-  ctx.font = '6px "Press Start 2P"';
+  ctx.font = fsc(6);
   ctx.fillStyle = `rgba(180,140,160,${alpha})`;
   descLines.forEach(l => { ctx.fillText(l, W/2, cy2); cy2 += 13; });
   cy2 += 6;
@@ -906,7 +1178,7 @@ function drawCursePopup(timestamp) {
   cy2 += 12;
 
   // Echo bonus
-  ctx.font = '6px "Press Start 2P"';
+  ctx.font = fsc(6);
   ctx.fillStyle = `rgba(200,136,255,${alpha})`;
   ctx.fillText('◆ ECHO BONUS: x' + curseEchoMultiplier.toFixed(2), W/2, cy2);
 
@@ -988,7 +1260,7 @@ function drawPursuer(timestamp) {
   const dx5=player.wx-pursuer.wx,dy5=player.wy-pursuer.wy;
   const dist5=Math.sqrt(dx5*dx5+dy5*dy5);
   if(dist5<6){ctx.strokeStyle=`rgba(255,0,0,${(1-dist5/6)*0.5})`;ctx.lineWidth=2;ctx.strokeRect(sx-2,sy2-2,20,20);}
-  ctx.font='4px "Press Start 2P"'; ctx.fillStyle='#ff2200'; ctx.textAlign='center';
+  ctx.font = fs(4); ctx.fillStyle='#ff2200'; ctx.textAlign='center';
   ctx.fillText('HUNT',sx+8,sy2-4); ctx.textAlign='left';
 }
 
@@ -1510,7 +1782,7 @@ function drawGhost(timestamp) {
   // ── Name tag ────────────────────────────────────────────
   ctx.save();
   ctx.globalAlpha = a * 0.55;
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fs(5);
   ctx.fillStyle = '#88aadd';
   ctx.textAlign = 'center';
   ctx.fillText('Cael', sx+8, sy2-5+gy);
@@ -1521,7 +1793,7 @@ function drawGhost(timestamp) {
   if (ghost.dialogue && ghost.active) {
     ctx.save();
     ctx.globalAlpha = a;
-    ctx.font = '6px "Press Start 2P"';
+    ctx.font = fs(6);
 
     // Word wrap
     const maxW = 200;
@@ -1570,7 +1842,7 @@ function drawGhost(timestamp) {
   if (ghost.active) {
     ctx.save();
     ctx.globalAlpha = a * 0.45;
-    ctx.font = '5px "Press Start 2P"';
+    ctx.font = fs(5);
     ctx.fillStyle = '#445566';
     ctx.textAlign = 'center';
     ctx.fillText('TAB \u2014 skip guide', W/2, H - 8);
@@ -1589,9 +1861,50 @@ let _runKills = 0;
 
 const canvas = document.getElementById('game');
 metaLoad();
+a11yLoad();
 canvas.width = W;
 canvas.height = H;
 const ctx = canvas.getContext('2d');
+
+// ── Single resize function — scales canvas to fit available space ──
+function resizeGame() {
+  const titleEl  = document.getElementById('title');
+  const hud      = document.getElementById('hud');
+  const controls = document.getElementById('controls');
+  const wrapper  = document.getElementById('canvas-wrapper');
+  const gameWrap = document.getElementById('game-wrapper');
+
+  // HUD is fixed height — estimate if hidden
+  const HUD_H = 28;
+  const titleH    = titleEl  ? titleEl.offsetHeight + 6 : 0;
+  const controlsH = controls ? controls.offsetHeight + 6 : 0;
+  const borderH   = 6;
+
+  const availW = window.innerWidth;
+  const availH = window.innerHeight - titleH - HUD_H - controlsH - borderH;
+
+  const scale = Math.min(availW / W, availH / H);
+  const scaledW = Math.floor(W * scale);
+  const scaledH = Math.floor(H * scale);
+
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+  canvas.style.transform = `scale(${scale})`;
+  canvas.style.transformOrigin = 'top left';
+
+  wrapper.style.width  = scaledW + 'px';
+  wrapper.style.height = scaledH + 'px';
+  gameWrap.style.width = scaledW + 'px';
+
+  // HUD matches game width exactly
+  if (hud) {
+    hud.style.width = scaledW + 'px';
+  }
+}
+
+resizeGame();
+window.addEventListener('resize', resizeGame);
+screen.orientation && screen.orientation.addEventListener('change', () => setTimeout(resizeGame, 150));
 
 // ─── Seeded PRNG ────────────────────────────────────────────
 function mulberry32(seed) {
@@ -1658,6 +1971,8 @@ function getChunkBiome(cx, cy) {
 // ─── Chunk system ────────────────────────────────────────────
 const CHUNK = 16; // tiles per chunk
 const chunks = new Map();
+const _chunkGenQueue = []; // deferred chunk generation queue
+const _MAX_CHUNKS_PER_FRAME = 4;
 
 function chunkKey(cx, cy) { return `${cx},${cy}`; }
 
@@ -1785,86 +2100,68 @@ function generateChunk(cx, cy) {
       }
     }
 
+    // ── Occupied tile tracker — prevents stacking ──────────
+    const occupied = new Set(objects.map(o => `${o.lx},${o.ly}`));
+    function tryPlace(type, extra, ox, oy) {
+      const key = `${ox},${oy}`;
+      if (ox < 0 || ox >= CHUNK || oy < 0 || oy >= CHUNK) return false;
+      if (tiles[oy*CHUNK+ox] !== T.FLOOR) return false;
+      if (occupied.has(key)) return false;
+      occupied.add(key);
+      objects.push(Object.assign({type, lx:ox, ly:oy}, extra||{}));
+      return true;
+    }
+    function rndFloor(room2, margin) {
+      const m = margin||1;
+      return {
+        ox: room2.rx + m + Math.floor(rng()*(room2.rw - m*2)),
+        oy: room2.ry + m + Math.floor(rng()*(room2.rh - m*2)),
+      };
+    }
     // 1–3 scatter props per room
     const numProps = 1 + Math.floor(rng() * 3);
     for (let p = 0; p < numProps; p++) {
-      const ox = room.rx + 1 + Math.floor(rng() * (room.rw - 2));
-      const oy = room.ry + 1 + Math.floor(rng() * (room.rh - 2));
-      if (ox >= 0 && ox < CHUNK && oy >= 0 && oy < CHUNK && tiles[oy*CHUNK+ox] === T.FLOOR) {
-        const prop = props[Math.floor(rng() * props.length)];
-        objects.push({type: prop, lx: ox, ly: oy});
-      }
+      const {ox,oy} = rndFloor(room, 1);
+      tryPlace(props[Math.floor(rng()*props.length)], null, ox, oy);
     }
 
-    // Rare chest — combat mode gets more
+    // Rare chest
     if (rng() < (gameMode === 'hardcore' ? 0.45 : gameMode === 'combat' ? 0.22 : 0.10)) {
-      const ox = room.rx + 1 + Math.floor(rng()*(room.rw-2));
-      const oy = room.ry + 1 + Math.floor(rng()*(room.rh-2));
-      if (ox >= 0 && ox < CHUNK && oy >= 0 && oy < CHUNK && tiles[oy*CHUNK+ox] === T.FLOOR)
-        objects.push({type:'chest', lx:ox, ly:oy});
+      const {ox,oy} = rndFloor(room, 1); tryPlace('chest', null, ox, oy);
     }
 
-    // Coins — combat mode gets more
+    // Coins
     const numCoins = gameMode === 'hardcore'
-      ? Math.floor(rng() * 10) + 4
-      : gameMode === 'combat'
-      ? Math.floor(rng() * 6) + 1
-      : Math.floor(rng() * 2);
-    for (let c = 0; c < numCoins; c++) {
-      const ox = room.rx + Math.floor(rng()*room.rw);
-      const oy = room.ry + Math.floor(rng()*room.rh);
-      if (ox >= 0 && ox < CHUNK && oy >= 0 && oy < CHUNK && tiles[oy*CHUNK+ox] === T.FLOOR)
-        objects.push({type:'coin', lx:ox, ly:oy});
+      ? Math.floor(rng()*10)+4 : gameMode === 'combat'
+      ? Math.floor(rng()*6)+1  : Math.floor(rng()*2);
+    for (let ci = 0; ci < numCoins; ci++) {
+      const {ox,oy} = rndFloor(room, 0); tryPlace('coin', null, ox, oy);
     }
 
-    // Gems — combat mode gets more
+    // Gems
     if (rng() < (gameMode === 'hardcore' ? 0.50 : gameMode === 'combat' ? 0.22 : 0.07)) {
-      const ox = room.rx + 1 + Math.floor(rng()*(room.rw-2));
-      const oy = room.ry + 1 + Math.floor(rng()*(room.rh-2));
-      if (ox >= 0 && ox < CHUNK && oy >= 0 && oy < CHUNK && tiles[oy*CHUNK+ox] === T.FLOOR) {
-        const gemType = ['ruby','emerald','sapphire'][Math.floor(rng()*3)];
-        objects.push({type:'gem', gemType, lx:ox, ly:oy});
-      }
+      const {ox,oy} = rndFloor(room, 1);
+      tryPlace('gem', {gemType:['ruby','emerald','sapphire'][Math.floor(rng()*3)]}, ox, oy);
     }
 
-    // Oil flasks — generous spawn so danger feels fair
-    if (rng() < 0.55) {
-      const ox = room.rx + 1 + Math.floor(rng()*(room.rw-2));
-      const oy = room.ry + 1 + Math.floor(rng()*(room.rh-2));
-      if (ox >= 0 && ox < CHUNK && oy >= 0 && oy < CHUNK && tiles[oy*CHUNK+ox] === T.FLOOR)
-        objects.push({type:'oil_flask', lx:ox, ly:oy});
-    }
-    // Second flask chance in larger rooms
-    if (rng() < 0.30) {
-      const ox = room.rx + 1 + Math.floor(rng()*(room.rw-2));
-      const oy = room.ry + 1 + Math.floor(rng()*(room.rh-2));
-      if (ox >= 0 && ox < CHUNK && oy >= 0 && oy < CHUNK && tiles[oy*CHUNK+ox] === T.FLOOR)
-        objects.push({type:'oil_flask', lx:ox, ly:oy});
-    }
+    // Oil flasks
+    if (rng() < 0.55) { const {ox,oy}=rndFloor(room,1); tryPlace('oil_flask',null,ox,oy); }
+    if (rng() < 0.30) { const {ox,oy}=rndFloor(room,1); tryPlace('oil_flask',null,ox,oy); }
 
-    // Health potions — spawn in most rooms
-    if (rng() < 0.50) {
-      const ox = room.rx + 1 + Math.floor(rng()*(room.rw-2));
-      const oy = room.ry + 1 + Math.floor(rng()*(room.rh-2));
-      if (ox >= 0 && ox < CHUNK && oy >= 0 && oy < CHUNK && tiles[oy*CHUNK+ox] === T.FLOOR)
-        objects.push({type:'health_potion', lx:ox, ly:oy});
-    }
+    // Health potions
+    if (rng() < 0.50) { const {ox,oy}=rndFloor(room,1); tryPlace('health_potion',null,ox,oy); }
 
     // Special rooms — only in hub room, rare
     if (room === rooms[0]) {
       const roll = rng();
-      const ox = hubCx, oy = hubCy;
-      if (roll < 0.08) {
-        objects.push({type:'shrine', lx:ox, ly:oy});
-      } else if (roll < 0.15) {
-        objects.push({type:'vault', lx:ox, ly:oy, opened:false});
-      } else if (roll < 0.20) {
-        objects.push({type:'cursed_altar', lx:ox, ly:oy, used:false});
-      } else if (roll < 0.28) {
-        // Merchant NPC — spawns slightly offset from hub center
+      if      (roll < 0.08) tryPlace('shrine', null, hubCx, hubCy);
+      else if (roll < 0.15) tryPlace('vault', {opened:false}, hubCx, hubCy);
+      else if (roll < 0.20) tryPlace('cursed_altar', {used:false}, hubCx, hubCy);
+      else if (roll < 0.28) {
         const mx = Math.min(hubCx+1, room.rx+room.rw-2);
         const my = Math.min(hubCy+1, room.ry+room.rh-2);
-        objects.push({type:'merchant', lx:mx, ly:my, visited:false});
+        if (!tryPlace('merchant',{visited:false},mx,my))
+          tryPlace('merchant',{visited:false},hubCx,hubCy);
       }
     }
   } // end for rooms
@@ -2275,12 +2572,36 @@ function getChunk(cx, cy) {
   return chunks.get(k);
 }
 
+function preWarmChunks(wx, wy, radius) {
+  const cx = Math.floor(wx/CHUNK), cy = Math.floor(wy/CHUNK);
+  for (let dy = -radius; dy <= radius; dy++) {
+    for (let dx = -radius; dx <= radius; dx++) {
+      const key = chunkKey(cx+dx, cy+dy);
+      if (!chunks.has(key)) {
+        const already = _chunkGenQueue.some(([qx,qy]) => qx===cx+dx && qy===cy+dy);
+        if (!already) _chunkGenQueue.push([cx+dx, cy+dy]);
+      }
+    }
+  }
+}
+
 function getTile(wx, wy) {
   const cx = Math.floor(wx / CHUNK);
   const cy = Math.floor(wy / CHUNK);
   const lx = ((wx % CHUNK) + CHUNK) % CHUNK;
   const ly = ((wy % CHUNK) + CHUNK) % CHUNK;
   return getChunk(cx, cy).tiles[ly * CHUNK + lx];
+}
+
+function hcBiome(biome) {
+  // High contrast mode: boost wall/floor color difference
+  if (!A11Y.highContrast) return biome;
+  return Object.assign({}, biome, {
+    wallLit:  '#ffffff',
+    wallDark: '#111111',
+    floorLit: biome.floorLit,
+    floorDark:'#2a2a2a',
+  });
 }
 
 function isWalkable(wx, wy) {
@@ -2300,9 +2621,9 @@ function isWalkable(wx, wy) {
 
 // ─── Player ──────────────────────────────────────────────────
 const player = {
-  wx: 2, wy: 2,
-  px: 2 * TILE, py: 2 * TILE,
-  moving: false, targetWx: 2, targetWy: 2,
+  wx: 3, wy: 3,
+  px: 3 * TILE, py: 3 * TILE,
+  moving: false, targetWx: 3, targetWy: 3,
   moveTimer: 0, moveDur: 120,
   stepQueue: [],
   facing: 'down',
@@ -2525,6 +2846,7 @@ let shakeAmt = 0, shakeDur = 0, shakeTimer = 0;
 let hitStopTimer = 0;
 function hitStop(ms) { hitStopTimer = ms; }
 function triggerShake(amount, duration) {
+  if (!A11Y.screenshake) return;
   shakeAmt = amount; shakeDur = duration; shakeTimer = duration;
 }
 
@@ -2585,6 +2907,7 @@ function saveBest(stats) {
 const VAULT_COST = 300;
 
 function spawnFloatText(wx, wy, text, color) {
+  if (!A11Y.floatText) return;
   floatingTexts.push({
     wx, wy,
     px: wx * TILE + TILE/2,
@@ -2953,6 +3276,7 @@ function tickEnemies(dt, timestamp) {
     for (let dx = -2; dx <= 2; dx++) {
       spawnEnemiesForChunk(pcx+dx, pcy+dy);
       rollRandomEvent(pcx+dx, pcy+dy);
+      preWarmChunks((pcx+dx)*CHUNK, (pcy+dy)*CHUNK, 1);
     }
 
   // Remove enemies too far away
@@ -3838,7 +4162,7 @@ function drawEnemies(timestamp) {
     ctx.fillStyle = hpFrac > 0.5 ? `rgba(0,220,0,${a})` : hpFrac > 0.25 ? `rgba(255,180,0,${a})` : `rgba(255,0,0,${a})`;
     ctx.fillRect(sx+8-barW2/2, sy2-6, Math.floor(barW2*hpFrac), 3);
     if (isBoss && lit > 0.2) {
-      ctx.font = '5px "Press Start 2P"';
+      ctx.font = fs(5);
       ctx.fillStyle = `rgba(255,100,50,${a})`;
       ctx.textAlign = 'center';
       ctx.fillText(def.name, sx+8, sy2-10);
@@ -4949,7 +5273,7 @@ function drawInventory(timestamp) {
     ctx.strokeStyle = active ? '#cc8800' : '#331800';
     ctx.lineWidth = active ? 2 : 1;
     ctx.strokeRect(tx, iy, tabW, 28);
-    ctx.font = '6px "Press Start 2P"';
+    ctx.font = fsc(6);
     ctx.fillStyle = active ? '#ffaa00' : '#554422';
     ctx.textAlign = 'center';
     ctx.fillText(t, tx + tabW/2, iy + 17);
@@ -4961,7 +5285,7 @@ function drawInventory(timestamp) {
   ctx.fillRect(ix, iy+28, iw, 1);
 
   // ── Key hints ────────────────────────────────────────────
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fsc(5);
   ctx.fillStyle = '#332200';
   ctx.textAlign = 'center';
   ctx.fillText('A/D: SWITCH TAB     I/ESC: CLOSE', W/2, iy + ih - 10);
@@ -4980,7 +5304,7 @@ function drawInvTabWeapons(ix, contentY, iw, contentH, timestamp) {
   const owned = getOwnedWeapons();
   if (invCursor >= owned.length) invCursor = 0;
 
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fsc(5);
   ctx.fillStyle = '#443300';
   ctx.textAlign = 'center';
   ctx.fillText('A/D SELECT     ENTER EQUIP', W/2, contentY + 10);
@@ -5006,12 +5330,12 @@ function drawInvTabWeapons(ix, contentY, iw, contentH, timestamp) {
     ctx.shadowBlur=0; ctx.lineWidth=1;
 
     if (equipped) {
-      ctx.fillStyle=wpn.color; ctx.font='5px "Press Start 2P"'; ctx.textAlign='center';
+      ctx.fillStyle=wpn.color; ctx.font = fsc(5); ctx.textAlign='center';
       ctx.fillText('✦ EQUIPPED ✦', sx+slotW/2, slotY+12);
     }
     drawWeaponSprite(ctx, wpn.id, sx+slotW/2, slotY+(equipped?30:22), wpn.color, wpn.level, timestamp);
 
-    ctx.font='6px "Press Start 2P"'; ctx.fillStyle=selected||equipped?wpn.color:'#886644'; ctx.textAlign='center';
+    ctx.font = fsc(6); ctx.fillStyle=selected||equipped?wpn.color:'#886644'; ctx.textAlign='center';
     const nameY=slotY+130;
     const words=wpn.label.split(' ');
     if (words.length>1 && ctx.measureText(wpn.label).width>slotW-8) {
@@ -5029,7 +5353,7 @@ function drawInvTabWeapons(ix, contentY, iw, contentH, timestamp) {
         ctx.fillRect(pipX+p*(pipW+pipGap), slotY+148, pipW, 4);
       }
     }
-    ctx.font='5px "Press Start 2P"'; ctx.textAlign='left';
+    ctx.font = fsc(5); ctx.textAlign='left';
     const statX=sx+6; let statY=slotY+162;
     ctx.fillStyle='#664433';
     ctx.fillText('DMG: '+wpn.dmg, statX, statY); statY+=11;
@@ -5047,7 +5371,7 @@ function drawInvTabWeapons(ix, contentY, iw, contentH, timestamp) {
   });
 
   if (owned.length===1) {
-    ctx.font='5px "Press Start 2P"'; ctx.fillStyle='#332200'; ctx.textAlign='center';
+    ctx.font = fsc(5); ctx.fillStyle='#332200'; ctx.textAlign='center';
     ctx.fillText('buy weapons at the shop to unlock more slots', W/2, contentY+contentH-20);
     ctx.textAlign='left';
   }
@@ -5059,15 +5383,15 @@ function drawInvTabBuffs(ix, contentY, iw, contentH, timestamp) {
   let y1 = contentY + 6, y2 = contentY + 6;
 
   function row(label, val, color, col, y) {
-    ctx.font = '6px "Press Start 2P"'; ctx.fillStyle = color;
+    ctx.font = fs(6); ctx.fillStyle = color;
     ctx.fillText(label, col, y);
-    ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#554433';
+    ctx.font = fs(5); ctx.fillStyle = '#554433';
     ctx.fillText(val, col + 4, y + 11);
     return y + 22;
   }
 
   // ── Left: Passive items ───────────────────────────────
-  ctx.font = '6px "Press Start 2P"'; ctx.fillStyle = '#cc8800';
+  ctx.font = fs(6); ctx.fillStyle = '#cc8800';
   ctx.fillText('PASSIVE ITEMS', col1, y1); y1 += 14;
   ctx.fillStyle = '#331800';
   ctx.fillRect(col1, y1, iw/2-24, 1); y1 += 6;
@@ -5088,7 +5412,7 @@ function drawInvTabBuffs(ix, contentY, iw, contentH, timestamp) {
   ];
   const owned_pass = passives.filter(p => p.flag);
   if (owned_pass.length === 0) {
-    ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#332200';
+    ctx.font = fs(5); ctx.fillStyle = '#332200';
     ctx.fillText('No passive items.', col1+4, y1+10); y1 += 20;
   } else {
     for (const p of owned_pass) {
@@ -5097,7 +5421,7 @@ function drawInvTabBuffs(ix, contentY, iw, contentH, timestamp) {
       ctx.fillRect(col1, y1, iw/2-24, 18);
       ctx.strokeStyle = p.color + '66'; ctx.lineWidth = 1;
       ctx.strokeRect(col1, y1, iw/2-24, 18);
-      ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = p.color;
+      ctx.font = fs(5); ctx.fillStyle = p.color;
       ctx.fillText(p.label, col1+4, y1+7);
       ctx.fillStyle = '#443322';
       ctx.fillText(p.desc, col1+4, y1+15);
@@ -5106,13 +5430,13 @@ function drawInvTabBuffs(ix, contentY, iw, contentH, timestamp) {
   }
 
   // ── Right: Boosts (use with ENTER) ────────────────────
-  ctx.font = '6px "Press Start 2P"'; ctx.fillStyle = '#44ffaa';
+  ctx.font = fs(6); ctx.fillStyle = '#44ffaa';
   ctx.fillText('BOOSTS  (ENTER: use)', col2, y2); y2 += 14;
   ctx.fillStyle = '#113322';
   ctx.fillRect(col2, y2, iw/2-24, 1); y2 += 6;
 
   if (boostInventory.length === 0) {
-    ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#224433';
+    ctx.font = fs(5); ctx.fillStyle = '#224433';
     ctx.fillText('No boosts saved.', col2+4, y2+10); y2 += 20;
     ctx.fillText('Buy from merchant.', col2+4, y2);
   } else {
@@ -5127,13 +5451,13 @@ function drawInvTabBuffs(ix, contentY, iw, contentH, timestamp) {
       if (sel) { ctx.shadowColor=b2.color; ctx.shadowBlur=8*pulse; }
       ctx.strokeRect(col2, y2, iw/2-24, 22);
       ctx.shadowBlur=0; ctx.lineWidth=1;
-      ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = sel ? b2.color : '#448866';
+      ctx.font = fs(5); ctx.fillStyle = sel ? b2.color : '#448866';
       ctx.fillText((sel?'▶ ':'')+b2.name, col2+4, y2+8);
       ctx.fillStyle = '#226644';
       ctx.fillText(b2.desc, col2+4, y2+18);
       y2 += 26;
     });
-    ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#226644';
+    ctx.font = fs(5); ctx.fillStyle = '#226644';
     ctx.textAlign = 'center';
     ctx.fillText('W/S: SELECT BOOST     ENTER: USE', col2 + (iw/2-24)/2, y2+10);
     ctx.textAlign = 'left';
@@ -5150,7 +5474,7 @@ function drawInvTabStatus(ix, contentY, iw, contentH, timestamp) {
     ctx.fillRect(col, yRef, iw/2-24, 18);
     ctx.strokeStyle = color+'66'; ctx.lineWidth=1;
     ctx.strokeRect(col, yRef, iw/2-24, 18);
-    ctx.font='5px "Press Start 2P"'; ctx.fillStyle=color;
+    ctx.font = fs(5); ctx.fillStyle=color;
     ctx.fillText(label, col+4, yRef+7);
     ctx.fillStyle='#443322';
     ctx.fillText(val, col+4, yRef+15);
@@ -5158,7 +5482,7 @@ function drawInvTabStatus(ix, contentY, iw, contentH, timestamp) {
   }
 
   // ── Left: Active buffs ────────────────────────────────
-  ctx.font='6px "Press Start 2P"'; ctx.fillStyle='#44ff88';
+  ctx.font = fs(6); ctx.fillStyle='#44ff88';
   ctx.fillText('ACTIVE BUFFS', col1, y1); y1+=14;
   ctx.fillStyle='#113322'; ctx.fillRect(col1, y1, iw/2-24, 1); y1+=6;
 
@@ -5173,14 +5497,14 @@ function drawInvTabStatus(ix, contentY, iw, contentH, timestamp) {
 
 
   if (buffs.length===0) {
-    ctx.font='5px "Press Start 2P"'; ctx.fillStyle='#224433';
+    ctx.font = fs(5); ctx.fillStyle='#224433';
     ctx.fillText('No active buffs.', col1+4, y1+10);
   } else {
     for (const b of buffs) { if (y1>contentY+contentH-30) break; y1=sRow(b.label,b.val,b.color,y1,col1); }
   }
 
   // ── Right: Debuffs ─────────────────────────────────────
-  ctx.font='6px "Press Start 2P"'; ctx.fillStyle='#ff4444';
+  ctx.font = fs(6); ctx.fillStyle='#ff4444';
   ctx.fillText('DEBUFFS & CURSES', col2, y2); y2+=14;
   ctx.fillStyle='#440011'; ctx.fillRect(col2, y2, iw/2-24, 1); y2+=6;
 
@@ -5196,7 +5520,7 @@ function drawInvTabStatus(ix, contentY, iw, contentH, timestamp) {
   }
 
   if (debuffs.length===0) {
-    ctx.font='5px "Press Start 2P"'; ctx.fillStyle='#331122';
+    ctx.font = fs(5); ctx.fillStyle='#331122';
     ctx.fillText('No debuffs. Lucky.', col2+4, y2+10);
   } else {
     for (const d of debuffs) { if (y2>contentY+contentH-30) break; y2=sRow(d.label,d.val,d.color,y2,col2); }
@@ -5213,7 +5537,7 @@ function drawInvTabStatus(ix, contentY, iw, contentH, timestamp) {
       `DMG: ${player.attackDamage}`,
       `OIL: ${Math.ceil(oil)}%`,
     ];
-    ctx.font='5px "Press Start 2P"'; ctx.fillStyle='#554433'; ctx.textAlign='center';
+    ctx.font = fs(5); ctx.fillStyle='#554433'; ctx.textAlign='center';
     ctx.fillText(stats.join('     '), W/2, statY);
     ctx.textAlign='left';
   }
@@ -5234,11 +5558,11 @@ function drawModifierScreen(timestamp) {
   ctx.strokeStyle = '#221133'; ctx.lineWidth = 1; ctx.strokeRect(px+5,py+5,pw-10,ph-10);
 
   ctx.textAlign = 'center';
-  ctx.font = '12px "Press Start 2P"';
+  ctx.font = fsc(12);
   ctx.fillStyle = '#cc88ff';
   ctx.fillText('RUN MODIFIERS', W/2, py+30);
 
-  ctx.font = '6px "Press Start 2P"';
+  ctx.font = fsc(6);
   ctx.fillStyle = '#9966bb';
   ctx.fillText('optional challenges that change how the run plays  —  pick up to '+MAX_MODIFIERS, W/2, py+46);
 
@@ -5252,7 +5576,7 @@ function drawModifierScreen(timestamp) {
   }
   const multColor = totalMult >= 1.5 ? '#ffdd44' : totalMult >= 1.2 ? '#ffaa44' : totalMult < 1 ? '#ff4444' : '#88ff88';
   ctx.textAlign = 'center';
-  ctx.font = '7px "Press Start 2P"';
+  ctx.font = fsc(7);
   ctx.fillStyle = multColor;
   ctx.fillText('ECHO MULTIPLIER: x' + totalMult.toFixed(2) + '  (' + activeModifiers.size + '/' + MAX_MODIFIERS + ' active)', W/2, py+62);
   ctx.textAlign = 'left';
@@ -5281,20 +5605,20 @@ function drawModifierScreen(timestamp) {
     ctx.shadowBlur=0; ctx.lineWidth=1;
 
     // Icon + name
-    ctx.font = '6px "Press Start 2P"';
+    ctx.font = fsc(6);
     ctx.fillStyle = incompatible&&!active ? '#554455' : active ? def.color : selected ? '#cc88ff' : '#aa88bb';
     ctx.fillText(def.icon+' '+def.name, col+6, sy+14);
 
     // Echo tag
     const multStr = def.echoMult >= 1 ? '+' : '';
-    ctx.font = '5px "Press Start 2P"';
+    ctx.font = fsc(5);
     ctx.fillStyle = def.echoMult < 1 ? '#ff4444' : '#ffdd44';
     ctx.textAlign = 'right';
     ctx.fillText('x'+def.echoMult.toFixed(2)+' echo', col+slotW-6, sy+14);
     ctx.textAlign = 'left';
 
     // Desc
-    ctx.font = '5px "Press Start 2P"';
+    ctx.font = fsc(5);
     ctx.fillStyle = incompatible&&!active ? '#554455' : '#9977aa';
     // Word-wrap to slotW
     const words = def.desc.split(' ');
@@ -5309,13 +5633,13 @@ function drawModifierScreen(timestamp) {
 
     // Active badge
     if (active) {
-      ctx.fillStyle=def.color; ctx.font='5px "Press Start 2P"';
+      ctx.fillStyle=def.color; ctx.font = fsc(5);
       ctx.textAlign='right';
       ctx.fillText('✦ ON', col+slotW-6, sy+slotH-8);
       ctx.textAlign='left';
     }
     if (incompatible && !active) {
-      ctx.fillStyle='#886688'; ctx.font='5px "Press Start 2P"';
+      ctx.fillStyle='#886688'; ctx.font = fsc(5);
       ctx.textAlign='right';
       ctx.fillText('LOCKED', col+slotW-6, sy+slotH-8);
       ctx.textAlign='left';
@@ -5323,7 +5647,7 @@ function drawModifierScreen(timestamp) {
   });
 
   // Controls
-  ctx.textAlign='center'; ctx.font='6px "Press Start 2P"'; ctx.fillStyle='#7755aa';
+  ctx.textAlign='center'; ctx.font = fsc(6); ctx.fillStyle='#7755aa';
   ctx.fillText('ARROWS: navigate     ENTER/SPACE: toggle     BACKSPACE: clear all     ESC/R: start run', W/2, py+ph-14);
   ctx.textAlign='left';
 }
@@ -5351,12 +5675,12 @@ function drawPlaygroundScreen(timestamp) {
 
   // Title
   ctx.textAlign = 'center';
-  ctx.font = '11px "Press Start 2P"';
+  ctx.font = fsc(11);
   ctx.fillStyle = '#66ff88';
   ctx.shadowColor = '#33ff66'; ctx.shadowBlur = 10;
   ctx.fillText('PLAYGROUND', W/2, py2+26);
   ctx.shadowBlur = 0;
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fsc(5);
   ctx.fillStyle = '#335533';
   ctx.fillText('no echoes  ·  no records  ·  full control', W/2, py2+40);
 
@@ -5375,7 +5699,7 @@ function drawPlaygroundScreen(timestamp) {
 
     if (row.section) {
       // Section header
-      ctx.font = '6px "Press Start 2P"';
+      ctx.font = fsc(6);
       const secColor = row.section === 'EXPERIMENTAL' ? '#ffaa44' : '#446644';
       ctx.fillStyle = secColor;
       ctx.textAlign = 'left';
@@ -5398,7 +5722,7 @@ function drawPlaygroundScreen(timestamp) {
     }
 
     // Label
-    ctx.font = '5px "Press Start 2P"';
+    ctx.font = fsc(5);
     ctx.textAlign = 'left';
     ctx.fillStyle = selected ? '#aaffaa' : isExp ? '#aa7733' : '#668866';
     ctx.fillText(row.label, colX+5, rowY+11);
@@ -5407,12 +5731,12 @@ function drawPlaygroundScreen(timestamp) {
     if (row.type === 'seed') {
       const displaySeed = pgSeedTyping ? pgSeedInput + '▌' : String(pgCfg.seed);
       ctx.textAlign = 'right';
-      ctx.font = '5px "Press Start 2P"';
+      ctx.font = fsc(5);
       ctx.fillStyle = pgSeedTyping ? '#ffff44' : selected ? '#ffdd44' : '#886633';
       ctx.fillText(displaySeed, colX+colW-5, rowY+11);
       if (selected && !pgSeedTyping) {
         ctx.fillStyle = '#555533';
-        ctx.font = '4px "Press Start 2P"';
+        ctx.font = fsc(4);
         ctx.fillText('ENTER=type  ◄►=random', colX+colW-5, rowY+rowH+1);
       }
     } else {
@@ -5421,7 +5745,7 @@ function drawPlaygroundScreen(timestamp) {
         ? (pgCfg[row.id] ? '#44ff88' : '#ff4444')
         : selected ? '#ffdd44' : '#886633';
       ctx.textAlign = 'right';
-      ctx.font = '5px "Press Start 2P"';
+      ctx.font = fsc(5);
       ctx.fillStyle = valColor;
       ctx.fillText((selected ? '◄ ' : '') + val + (selected ? ' ►' : ''), colX+colW-5, rowY+11);
     }
@@ -5436,7 +5760,7 @@ function drawPlaygroundScreen(timestamp) {
   ctx.strokeStyle = '#223322'; ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(px2+1, botY); ctx.lineTo(px2+pw-1, botY); ctx.stroke();
   ctx.textAlign = 'center';
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fsc(5);
   ctx.fillStyle = '#335533';
   if (pgSeedTyping) {
     ctx.fillStyle = '#aaaa44';
@@ -5444,6 +5768,80 @@ function drawPlaygroundScreen(timestamp) {
   } else {
     ctx.fillText('W/S or ↑↓ navigate   ·   A/D or ◄► adjust   ·   ENTER launch   ·   ESC back', W/2, botY+13);
   }
+}
+
+
+function drawA11YMenu(timestamp) {
+  // Full overlay
+  ctx.fillStyle = 'rgba(0,0,0,0.93)';
+  ctx.fillRect(0, 0, W, H);
+
+  const pw = Math.min(W-40, 540), ph = Math.min(H-40, 400);
+  const px2 = (W-pw)/2, py2 = (H-ph)/2;
+
+  ctx.fillStyle = '#050808';
+  ctx.fillRect(px2, py2, pw, ph);
+  ctx.strokeStyle = '#226644'; ctx.lineWidth = 2;
+  ctx.strokeRect(px2, py2, pw, ph);
+  ctx.strokeStyle = '#113322'; ctx.lineWidth = 1;
+  ctx.strokeRect(px2+4, py2+4, pw-8, ph-8);
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.font = fsc(10);
+  ctx.fillStyle = '#44ffaa';
+  ctx.fillText('ACCESSIBILITY', W/2, py2+24);
+  ctx.font = fsc(5);
+  ctx.fillStyle = '#226644';
+  ctx.fillText('settings apply when you close this menu', W/2, py2+38);
+
+  // Preview text — redraws with pending scale in real time
+  const previewScale = A11Y_TEXT_SCALES[A11Y_pending.textScale] || 1;
+  const previewPx = Math.max(4, Math.round(7 * previewScale));
+  ctx.font = previewPx + 'px "Press Start 2P"';
+  ctx.fillStyle = '#558866';
+  ctx.fillText('"THE DUNGEON HAS NO EDGE"', W/2, py2+56);
+
+  // Row list
+  const rowH = 28, startY = py2 + 76, colX = px2 + 20, valX = px2 + pw - 20;
+  A11Y_ROWS.forEach((row, i) => {
+    const sel = i === a11yCursor;
+    const ry = startY + i * rowH;
+
+    ctx.fillStyle = sel ? '#0a1a10' : '#030808';
+    ctx.fillRect(colX-4, ry-2, pw-32, rowH-4);
+    if (sel) {
+      ctx.strokeStyle = '#44ff88'; ctx.lineWidth = 1;
+      ctx.strokeRect(colX-4, ry-2, pw-32, rowH-4);
+    }
+
+    // Label
+    ctx.font = fsc(6);
+    ctx.textAlign = 'left';
+    ctx.fillStyle = sel ? '#aaffcc' : '#448866';
+    ctx.fillText(row.label, colX, ry + 12);
+
+    // Value with arrows if selected
+    const val = a11yValue(row, true);
+    const boolVal = row.type === 'bool' ? A11Y_pending[row.id] : null;
+    ctx.font = fsc(6);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = boolVal === false ? '#ff4444'
+                  : boolVal === true  ? '#44ff88'
+                  : sel ? '#ffdd44' : '#886633';
+    ctx.fillText(sel ? '◄ ' + val + ' ►' : val, valX, ry + 12);
+  });
+
+  // Bottom bar
+  const botY = py2 + ph - 22;
+  ctx.fillStyle = '#020a05';
+  ctx.fillRect(px2+1, botY, pw-2, 21);
+  ctx.strokeStyle = '#113322'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(px2+1, botY); ctx.lineTo(px2+pw-1, botY); ctx.stroke();
+  ctx.textAlign = 'center';
+  ctx.font = fsc(5);
+  ctx.fillStyle = '#335544';
+  ctx.fillText('W/S navigate   A/D adjust   ENTER confirm   ESC cancel', W/2, botY+13);
 }
 
 function drawMerchant(ctx, sx, sy, lit, timestamp, wx, wy) {
@@ -5474,7 +5872,7 @@ function drawMerchant(ctx, sx, sy, lit, timestamp, wx, wy) {
   ctx.fillRect(sx+8, sy+2+bob, 12, 12);
   // Label
   if (lit > 0.3) {
-    ctx.font = '5px "Press Start 2P"';
+    ctx.font = fsc(5);
     ctx.fillStyle = `rgba(255,200,80,${a})`;
     ctx.textAlign = 'center';
     ctx.fillText('MERCHANT', sx + 8, sy - 3 + bob);
@@ -5498,11 +5896,11 @@ function drawMerchantShop(timestamp) {
   ctx.strokeRect(mx+4, my+4, mw-8, mh-8);
 
   // Title
-  ctx.font = '8px "Press Start 2P"';
+  ctx.font = fs(8);
   ctx.fillStyle = '#cc88ff';
   ctx.textAlign = 'center';
   ctx.fillText('WANDERING MERCHANT', W/2, my+22);
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fs(5);
   ctx.fillStyle = '#664488';
   ctx.fillText('"I have what the dungeon cannot provide."', W/2, my+36);
   ctx.fillStyle = '#ffdd44';
@@ -5518,7 +5916,7 @@ function drawMerchantShop(timestamp) {
     // Section header
     if (sectionLabels[i]) {
       const hy = my + 58 + i * rowH;
-      ctx.font = '4px "Press Start 2P"';
+      ctx.font = fs(4);
       ctx.fillStyle = '#442266';
       ctx.textAlign = 'center';
       ctx.fillText(sectionLabels[i], W/2, hy - 2);
@@ -5541,27 +5939,27 @@ function drawMerchantShop(timestamp) {
     const badgeCol = item.type === 'exclusive' ? '#cc44ff' : '#448844';
     ctx.fillStyle = badgeCol;
     ctx.fillRect(ix, iy+2, item.type === 'exclusive' ? 44 : 36, 8);
-    ctx.font = '4px "Press Start 2P"';
+    ctx.font = fs(4);
     ctx.fillStyle = '#000';
     ctx.fillText(item.type === 'exclusive' ? 'EXCLUSIVE' : 'STOCK', ix+2, iy+9);
 
     // Name
-    ctx.font = '7px "Press Start 2P"';
+    ctx.font = fs(7);
     ctx.fillStyle = item.bought ? '#332244' : selected ? '#dd99ff' : '#996699';
     ctx.fillText(item.name, ix, iy+24);
 
     // Desc
-    ctx.font = '5px "Press Start 2P"';
+    ctx.font = fs(5);
     ctx.fillStyle = item.bought ? '#221133' : '#664477';
     ctx.fillText(item.desc, ix, iy+38);
 
     // Cost / SOLD
     ctx.textAlign = 'right';
     if (item.bought) {
-      ctx.font = '6px "Press Start 2P"'; ctx.fillStyle = '#331144';
+      ctx.font = fs(6); ctx.fillStyle = '#331144';
       ctx.fillText('SOLD', mx+mw-20, iy+24);
     } else {
-      ctx.font = '7px "Press Start 2P"';
+      ctx.font = fs(7);
       ctx.fillStyle = canAfford ? '#ffdd44' : '#443322';
       ctx.fillText(`${item.cost}g`, mx+mw-20, iy+24);
     }
@@ -5569,7 +5967,7 @@ function drawMerchantShop(timestamp) {
   });
 
   // Footer
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fs(5);
   ctx.fillStyle = '#442255';
   ctx.textAlign = 'center';
   ctx.fillText('W/S: SELECT     ENTER: BUY     E/ESC: LEAVE', W/2, my+mh-10);
@@ -5591,11 +5989,11 @@ function drawShop(timestamp) {
   ctx.strokeRect(sx+4, sy+4, sw-8, sh-8);
 
   // Title
-  ctx.font = '9px "Press Start 2P"';
+  ctx.font = fsc(9);
   ctx.fillStyle = '#ff9900';
   ctx.textAlign = 'center';
   ctx.fillText('SHOP', W/2, sy + 22);
-  ctx.font = '6px "Press Start 2P"';
+  ctx.font = fsc(6);
   ctx.fillStyle = '#ffdd44';
   ctx.fillText(`GOLD: ${gold}g    BOMBS: ${bombCount}`, W/2, sy + 38);
 
@@ -5610,7 +6008,7 @@ function drawShop(timestamp) {
     ctx.fillRect(tx, ty, tw, th);
     ctx.strokeStyle = active ? '#ff9900' : '#442200'; ctx.lineWidth = 1;
     ctx.strokeRect(tx, ty, tw, th);
-    ctx.font = '6px "Press Start 2P"';
+    ctx.font = fsc(6);
     ctx.fillStyle = active ? '#ffcc44' : '#664422';
     ctx.textAlign = 'center';
     ctx.fillText(tab, tx + tw/2, ty + 12);
@@ -5650,17 +6048,17 @@ function drawShop(timestamp) {
       ctx.fillStyle = active ? '#ffaa00' : (owned ? '#446644' : '#332200');
       ctx.fillRect(ix + 4, iy + 2, 6, 6);
       if (active) {
-        ctx.font = '5px "Press Start 2P"';
+        ctx.font = fsc(5);
         ctx.fillStyle = '#ffaa00';
         ctx.fillText('EQUIPPED', sx + sw - 80, iy + 10);
       }
     }
 
-    ctx.font = '7px "Press Start 2P"';
+    ctx.font = fsc(7);
     ctx.fillStyle = maxed ? '#886600' : (selected ? '#ffcc44' : '#cc8800');
     ctx.fillText(displayName, ix + 14, iy + 14);
 
-    ctx.font = '5px "Press Start 2P"';
+    ctx.font = fsc(5);
     ctx.fillStyle = '#886644';
     ctx.fillText(upg.desc, ix + 14, iy + 27);
 
@@ -5670,17 +6068,17 @@ function drawShop(timestamp) {
         ctx.fillRect(ix + 14 + p * 13, iy + 34, 10, 5);
       }
     } else {
-      ctx.font = '5px "Press Start 2P"';
+      ctx.font = fsc(5);
       ctx.fillStyle = '#ffaa44';
       ctx.fillText(`Owned: ${bombCount}  (buy more with ENTER)`, ix + 14, iy + 38);
     }
 
     ctx.textAlign = 'right';
     if (maxed) {
-      ctx.font = '6px "Press Start 2P"'; ctx.fillStyle = '#664400';
+      ctx.font = fsc(6); ctx.fillStyle = '#664400';
       ctx.fillText('MAXED', sx + sw - 20, iy + 18);
     } else {
-      ctx.font = '6px "Press Start 2P"';
+      ctx.font = fsc(6);
       ctx.fillStyle = canAfford ? '#ffdd44' : '#554400';
       ctx.fillText(`${cost}g`, sx + sw - 20, iy + 18);
     }
@@ -5688,11 +6086,11 @@ function drawShop(timestamp) {
   });
 
   if (tabUpgrades.length > 5) {
-    ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#443300';
+    ctx.font = fsc(5); ctx.fillStyle = '#443300';
     ctx.textAlign = 'center';
     ctx.fillText(`${shopCursor+1} / ${tabUpgrades.length}`, W/2, sy + sh - 24);
   }
-  ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#443300';
+  ctx.font = fsc(5); ctx.fillStyle = '#443300';
   ctx.textAlign = 'center';
   ctx.fillText('W/S: SELECT   ENTER: BUY/EQUIP   A/D: TABS   E: CLOSE', W/2, sy + sh - 10);
   ctx.textAlign = 'left';
@@ -5703,10 +6101,10 @@ function drawShop(timestamp) {
 let loreOpen = false;
 let loreTab = 0;
 let loreScroll = 0;
-const LORE_TABS = ['LORE', 'STORY', 'CONTROLS', 'COMBAT', 'ENEMIES', 'ITEMS', 'BIOMES', 'MODES', 'COMBOS'];
+const LORE_TABS = ['LORE', 'STORY', 'CONTROLS', 'COMBAT', 'ENEMIES', 'ITEMS', 'BIOMES', 'MODES', 'COMBOS', 'ACCESS'];
 
 // Per-tab scroll positions
-const loreScrolls = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+const loreScrolls = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 document.addEventListener('wheel', e => {
   if (!loreOpen) return;
@@ -5727,13 +6125,13 @@ function drawStartMenu(timestamp) {
   const glow = 0.6 + Math.sin(t * 0.002) * 0.4;
   ctx.shadowColor = `rgba(255,80,0,${glow})`;
   ctx.shadowBlur = 24;
-  ctx.font = '28px "Press Start 2P"';
+  ctx.font = fsc(28);
   ctx.fillStyle = '#ff9900';
   ctx.textAlign = 'center';
   ctx.fillText('∞ DELVE ∞', W/2, 80);
   ctx.shadowBlur = 0;
 
-  ctx.font = '7px "Press Start 2P"';
+  ctx.font = fsc(7);
   ctx.fillStyle = '#664422';
   ctx.fillText('THE INFINITE DARK', W/2, 100);
 
@@ -5742,7 +6140,7 @@ function drawStartMenu(timestamp) {
   ctx.fillRect(W/2 - 100, 112, 200, 1);
 
   // Tagline
-  ctx.font = '6px "Press Start 2P"';
+  ctx.font = fsc(6);
   ctx.fillStyle = '#553322';
   const tagline = startMenuCursor === 3
     ? 'she went down first. find her.'
@@ -5850,13 +6248,13 @@ function drawStartMenu(timestamp) {
     ctx.lineWidth = 1;
 
     // Mode label
-    ctx.font = '8px "Press Start 2P"';
+    ctx.font = fsc(8);
     ctx.fillStyle = selected ? mode.color : mode.borderColor;
     ctx.textAlign = 'center';
     ctx.fillText(mode.label, cx2 + cardW/2, cy3 + 20);
 
     // Bullet lines
-    ctx.font = '5px "Press Start 2P"';
+    ctx.font = fsc(5);
     ctx.textAlign = 'left';
     mode.lines.forEach((line, li) => {
       const isBonus = line.startsWith('★') || line.startsWith('◆');
@@ -5869,7 +6267,7 @@ function drawStartMenu(timestamp) {
 
     // Selected indicator
     if (selected) {
-      ctx.font = '5px "Press Start 2P"';
+      ctx.font = fsc(5);
       ctx.fillStyle = mode.color;
       ctx.textAlign = 'center';
       ctx.fillText('▼ SELECTED ▼', cx2 + cardW/2, cy3 + cardH - 8);
@@ -5889,30 +6287,43 @@ function drawStartMenu(timestamp) {
   if (pgSel) { ctx.shadowColor = '#44ff66'; ctx.shadowBlur = 12*pgPulse; }
   ctx.strokeRect(pgTileX, pgTileY, pgTileW, pgTileH);
   ctx.shadowBlur = 0; ctx.lineWidth = 1;
-  ctx.font = '8px "Press Start 2P"';
+  ctx.font = fsc(8);
   ctx.fillStyle = pgSel ? '#66ff88' : '#335533';
   ctx.textAlign = 'center';
   ctx.fillText('🔧 PLAYGROUND', W/2, pgTileY+14);
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fsc(5);
   ctx.fillStyle = pgSel ? '#44aa55' : '#223322';
   ctx.fillText('sandbox mode  ·  configure everything  ·  no echoes earned', W/2, pgTileY+26);
   if (pgSel) {
-    ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#66ff88';
+    ctx.font = fsc(5); ctx.fillStyle = '#66ff88';
     ctx.fillText('▼ SELECTED ▼', W/2, pgTileY+pgTileH-4);
   }
 
-  const bottomY = cardY + cardH*2 + spacing + pgTileH + 22;
-  ctx.font = '6px "Press Start 2P"';
+  // Accessibility button on start menu
+  const a11yBtnY = pgTileY + pgTileH + 6;
+  const a11yBtnW = 160, a11yBtnH = 22;
+  const a11yBtnX = W/2 - a11yBtnW/2;
+  ctx.fillStyle = '#020805';
+  ctx.fillRect(a11yBtnX, a11yBtnY, a11yBtnW, a11yBtnH);
+  ctx.strokeStyle = '#226644'; ctx.lineWidth = 1;
+  ctx.strokeRect(a11yBtnX, a11yBtnY, a11yBtnW, a11yBtnH);
+  ctx.font = fsc(6);
+  ctx.fillStyle = '#44aa77';
+  ctx.textAlign = 'center';
+  ctx.fillText('[ A ] ACCESSIBILITY', W/2, a11yBtnY + 14);
+
+  const bottomY = cardY + cardH*2 + spacing + pgTileH + a11yBtnH + 30;
+  ctx.font = fsc(6);
   ctx.fillStyle = '#443322';
   ctx.textAlign = 'center';
   ctx.fillText('← → ↑ ↓  or  A / D / W / S  to choose', W/2, bottomY);
 
   ctx.fillStyle = '#ffaa44';
-  ctx.font = '7px "Press Start 2P"';
+  ctx.font = fsc(7);
   ctx.fillText('ENTER or SPACE — BEGIN', W/2, bottomY + 18);
 
   ctx.fillStyle = '#443322';
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fsc(5);
   ctx.fillText('?  —  open help', W/2, bottomY + 34);
 
   // Vault button
@@ -5923,12 +6334,12 @@ function drawStartMenu(timestamp) {
   ctx.strokeStyle = '#cc88ff';
   ctx.lineWidth = 1;
   ctx.strokeRect(vbX, vbY, vbW, vbH);
-  ctx.font = '6px "Press Start 2P"';
+  ctx.font = fsc(6);
   ctx.fillStyle = '#cc88ff';
   ctx.textAlign = 'center';
   ctx.fillText('[ V ] VAULT', W/2, vbY + 14);
   // Echo count under button
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fsc(5);
   ctx.fillStyle = '#664488';
   ctx.fillText(`◆ ${META.echoes} echoes`, W/2, vbY + 32);
 
@@ -5963,10 +6374,10 @@ function drawVaultScreen(timestamp) {
   ctx.strokeRect(vx+4, vy+4, vw-8, vh-8);
 
   // Header row
-  ctx.font = '9px "Press Start 2P"';
+  ctx.font = fsc(9);
   ctx.fillStyle = '#cc88ff'; ctx.textAlign = 'left';
   ctx.fillText('THE VAULT', vx+12, vy+18);
-  ctx.font = '7px "Press Start 2P"';
+  ctx.font = fsc(7);
   ctx.fillStyle = '#ffdd44'; ctx.textAlign = 'right';
   ctx.fillText('\u25c6 ' + META.echoes + ' ECHOES', vx+vw-12, vy+18);
   ctx.textAlign = 'left';
@@ -5987,7 +6398,7 @@ function drawVaultScreen(timestamp) {
     ctx.strokeStyle = active ? '#cc88ff' : '#441166';
     ctx.lineWidth = active ? 2 : 1;
     ctx.strokeRect(tx, tabY, tabW, tabH);
-    ctx.font = '7px "Press Start 2P"';
+    ctx.font = fsc(7);
     ctx.fillStyle = active ? '#cc88ff' : '#553366';
     ctx.textAlign = 'center';
     ctx.fillText(tab, tx + tabW/2, tabY + 13);
@@ -5995,7 +6406,7 @@ function drawVaultScreen(timestamp) {
   ctx.textAlign = 'left';
 
   // Tab underline hint
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fsc(5);
   ctx.fillStyle = '#442255';
   ctx.textAlign = 'center';
   ctx.fillText('A / D  to switch tabs', W/2, tabY + tabH + 10);
@@ -6009,7 +6420,7 @@ function drawVaultScreen(timestamp) {
   else                     drawVaultScreenRecords(vx, contentY, vw, contentH);
 
   // Footer
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fsc(5);
   ctx.fillStyle = '#331144';
   ctx.textAlign = 'center';
   ctx.fillText('ESC \u2014 close vault', W/2, vy + vh - 6);
@@ -6042,18 +6453,19 @@ function drawVaultScreenClass(x, y, w, h) {
 
     // Cursor arrow
     if (hovered) {
-      ctx.font = '7px "Press Start 2P"';
+      ctx.font = fsc(7);
       ctx.fillStyle = '#cc88ff';
       ctx.fillText('\u25b6', x + 6, ry + 18);
     }
 
     // Name
-    ctx.font = '7px "Press Start 2P"';
+    ctx.font = fsc(7);
+    const _voidHidden = cls.secret && !META.unlockedClasses.includes(cls.id);
     ctx.fillStyle = unlocked ? cls.color : '#443355';
-    ctx.fillText(cls.name, x + 18, ry + 12);
+    ctx.fillText(_voidHidden ? '???' : cls.name, x + 18, ry + 12);
 
     // Status tag
-    ctx.font = '5px "Press Start 2P"';
+    ctx.font = fsc(5);
     if (selected) {
       ctx.fillStyle = cls.color;
       ctx.fillText('\u2713 ACTIVE', x + 18, ry + 22);
@@ -6082,12 +6494,12 @@ function drawVaultScreenClass(x, y, w, h) {
     ctx.strokeRect(detailX, y, detailW - 2, h);
 
     // Class name
-    ctx.font = '8px "Press Start 2P"';
+    ctx.font = fsc(8);
     ctx.fillStyle = cls.color;
     ctx.fillText(cls.name, dp, cy2 + 10); cy2 += 26;
 
     // Lore line
-    ctx.font = '6px "Press Start 2P"';
+    ctx.font = fsc(6);
     ctx.fillStyle = '#554466';
     wrapText(cls.lore, dp, cy2, detailW - 28, 10, '#554466', '5px'); cy2 += 28;
 
@@ -6104,7 +6516,7 @@ function drawVaultScreenClass(x, y, w, h) {
       ['DASH CD', st.dashCooldown === 0 ? 'NONE' : st.dashCooldown + 'ms', st.dashCooldown === 0 ? '#44ffaa' : '#aaaaaa'],
       ['LIGHT', (st.lightBonus >= 0 ? '+' : '') + st.lightBonus, st.lightBonus > 0 ? '#ffdd44' : st.lightBonus < 0 ? '#ff4466' : '#aaaaaa'],
     ];
-    ctx.font = '6px "Press Start 2P"';
+    ctx.font = fsc(6);
     for (const [label, val, col2] of statRows) {
       ctx.fillStyle = '#664477';
       ctx.fillText(label, dp, cy2);
@@ -6129,19 +6541,19 @@ function drawVaultScreenClass(x, y, w, h) {
     const unlocked = META.unlockedClasses.includes(cls.id);
     const isSelected = META.selectedClass === cls.id;
     if (isSelected) {
-      ctx.font = '6px "Press Start 2P"'; ctx.fillStyle = cls.color;
+      ctx.font = fsc(6); ctx.fillStyle = cls.color;
       ctx.fillText('\u2713 ACTIVE CLASS', dp, cy2);
     } else if (unlocked) {
-      ctx.font = '6px "Press Start 2P"'; ctx.fillStyle = '#44ffaa';
+      ctx.font = fsc(6); ctx.fillStyle = '#44ffaa';
       ctx.fillText('ENTER  \u2014  select this class', dp, cy2);
     } else {
       const canAfford = META.echoes >= cls.cost;
-      ctx.font = '6px "Press Start 2P"';
+      ctx.font = fsc(6);
       ctx.fillStyle = canAfford ? '#ffdd44' : '#ff4444';
       ctx.fillText('ENTER  \u2014  unlock  (\u25c6 ' + cls.cost + ')', dp, cy2);
       if (!canAfford) {
         ctx.fillStyle = '#553344'; cy2 += 12;
-        ctx.font = '5px "Press Start 2P"';
+        ctx.font = fsc(5);
         ctx.fillText('need ' + (cls.cost - META.echoes) + ' more echoes', dp, cy2);
       }
     }
@@ -6184,17 +6596,17 @@ function drawVaultScreenPerks(x, y, w, h) {
 
     // Cursor arrow
     if (hovered) {
-      ctx.font = '7px "Press Start 2P"'; ctx.fillStyle = '#cc88ff';
+      ctx.font = fsc(7); ctx.fillStyle = '#cc88ff';
       ctx.fillText('\u25b6', x + 5, ry + 17);
     }
 
     // Name
-    ctx.font = '6px "Press Start 2P"';
+    ctx.font = fsc(6);
     ctx.fillStyle = locked ? '#332244' : owned ? (equipped ? perk.color : '#cc99ee') : '#664466';
     ctx.fillText(perk.name, x + 17, ry + 11);
 
     // Status tag
-    ctx.font = '5px "Press Start 2P"';
+    ctx.font = fsc(5);
     if (locked) {
       ctx.fillStyle = '#331133';
       ctx.fillText('LOCKED', x + 17, ry + 21);
@@ -6217,7 +6629,7 @@ function drawVaultScreenPerks(x, y, w, h) {
 
   // Scroll indicator
   if (perks.length > visRows) {
-    ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#442255'; ctx.textAlign = 'center';
+    ctx.font = fsc(5); ctx.fillStyle = '#442255'; ctx.textAlign = 'center';
     const pct = scrollStart / Math.max(1, perks.length - visRows);
     ctx.fillText('\u2191\u2193  ' + (vaultCursor+1) + '/' + perks.length, x + listW/2, y + h - 18);
     ctx.textAlign = 'left';
@@ -6225,7 +6637,7 @@ function drawVaultScreenPerks(x, y, w, h) {
 
   // Equipped bar at bottom of list
   const barY = y + h - 14;
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fsc(5);
   ctx.fillStyle = '#553366';
   ctx.fillText('EQUIPPED (' + META.equippedPerks.length + '/3):', x, barY);
   let bx = x + 108;
@@ -6256,12 +6668,12 @@ function drawVaultScreenPerks(x, y, w, h) {
   const locked    = !!(perk.lockedUntil && !META.achievementsUnlocked.includes(perk.lockedUntil));
 
   // Perk name
-  ctx.font = '8px "Press Start 2P"';
+  ctx.font = fsc(8);
   ctx.fillStyle = locked ? '#443355' : owned ? perk.color : '#664466';
   ctx.fillText(perk.name, dp, cy2 + 10); cy2 += 26;
 
   // Status badge
-  ctx.font = '6px "Press Start 2P"';
+  ctx.font = fsc(6);
   if (equipped) {
     ctx.fillStyle = perk.color;
     ctx.fillText('\u2713 EQUIPPED', dp, cy2); cy2 += 16;
@@ -6290,7 +6702,7 @@ function drawVaultScreenPerks(x, y, w, h) {
     ctx.beginPath(); ctx.moveTo(dp, cy2); ctx.lineTo(detailX + detailW - 14, cy2); ctx.stroke();
     cy2 += 12;
     const achDef = ACHIEVEMENT_DEFS.find(a => a.id === perk.lockedUntil);
-    ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#553355';
+    ctx.font = fsc(5); ctx.fillStyle = '#553355';
     ctx.fillText('UNLOCK REQUIRES:', dp, cy2); cy2 += 11;
     if (achDef) wrapText(achDef.desc, dp, cy2, detailW - 28, 10, '#443344', '5px');
     return;
@@ -6303,23 +6715,23 @@ function drawVaultScreenPerks(x, y, w, h) {
   // Action
   if (!owned) {
     const canAfford = META.echoes >= perk.cost;
-    ctx.font = '6px "Press Start 2P"';
+    ctx.font = fsc(6);
     ctx.fillStyle = canAfford ? '#ffdd44' : '#ff4444';
     ctx.fillText('ENTER  \u2014  buy perk', dp, cy2); cy2 += 14;
     if (!canAfford) {
-      ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#553344';
+      ctx.font = fsc(5); ctx.fillStyle = '#553344';
       ctx.fillText('need ' + (perk.cost - META.echoes) + ' more echoes', dp, cy2);
     }
   } else if (equipped) {
-    ctx.font = '6px "Press Start 2P"'; ctx.fillStyle = '#ff8866';
+    ctx.font = fsc(6); ctx.fillStyle = '#ff8866';
     ctx.fillText('ENTER  \u2014  unequip', dp, cy2);
   } else {
     const canEquip = META.equippedPerks.length < 3;
-    ctx.font = '6px "Press Start 2P"';
+    ctx.font = fsc(6);
     ctx.fillStyle = canEquip ? '#44ffaa' : '#ff4444';
     ctx.fillText(canEquip ? 'ENTER  \u2014  equip' : 'ENTER  \u2014  swap out', dp, cy2); cy2 += 14;
     if (!canEquip) {
-      ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#553344';
+      ctx.font = fsc(5); ctx.fillStyle = '#553344';
       ctx.fillText('(unequip one first)', dp, cy2);
     }
   }
@@ -6334,7 +6746,7 @@ function drawVaultScreenRecords(x, y, w, h) {
   const rx = x + colW + 4;
 
   // Left: stats
-  ctx.font = '7px "Press Start 2P"'; ctx.fillStyle = '#cc88ff';
+  ctx.font = fs(7); ctx.fillStyle = '#cc88ff';
   ctx.fillText('STATISTICS', x + PAD, ly); ly += 18;
 
   const stats2 = [
@@ -6348,7 +6760,7 @@ function drawVaultScreenRecords(x, y, w, h) {
     ['Cursed clears', META.achievements.cursedRunsCompleted],
   ];
   for (const [label, val] of stats2) {
-    ctx.font = '5px "Press Start 2P"';
+    ctx.font = fs(5);
     ctx.fillStyle = '#775588';
     ctx.fillText(label, x + PAD, ly);
     ctx.fillStyle = '#ffdd44'; ctx.textAlign = 'right';
@@ -6358,13 +6770,13 @@ function drawVaultScreenRecords(x, y, w, h) {
   }
 
   // Right: achievements
-  ctx.font = '7px "Press Start 2P"'; ctx.fillStyle = '#cc88ff';
+  ctx.font = fs(7); ctx.fillStyle = '#cc88ff';
   ctx.fillText('ACHIEVEMENTS', rx, ry2); ry2 += 18;
 
   for (const def of ACHIEVEMENT_DEFS) {
     if (ry2 > y + h - 10) break;
     const done = META.achievementsUnlocked.includes(def.id);
-    ctx.font = '5px "Press Start 2P"';
+    ctx.font = fs(5);
     ctx.fillStyle = done ? '#44ff88' : '#332244';
     ctx.fillText((done ? '\u2713 ' : '\u25a1 ') + def.label, rx, ry2);
     if (done) {
@@ -6417,11 +6829,11 @@ function drawLoreMenu(timestamp) {
   }
 
   // Title
-  ctx.font = '13px "Press Start 2P"';
+  ctx.font = fsc(13);
   ctx.fillStyle = '#ff9900';
   ctx.textAlign = 'center';
   ctx.fillText('∞  DELVE', W/2, my + 34);
-  ctx.font = '7px "Press Start 2P"';
+  ctx.font = fsc(7);
   ctx.fillStyle = '#664400';
   ctx.fillText('THE INFINITE DARK', W/2, my + 50);
 
@@ -6441,7 +6853,7 @@ function drawLoreMenu(timestamp) {
     ctx.strokeStyle = active ? '#ff9900' : '#442200';
     ctx.lineWidth = active ? 2 : 1;
     ctx.strokeRect(tx, tabY, tabW - 3, tabH);
-    ctx.font = '8px "Press Start 2P"';
+    ctx.font = fsc(8);
     ctx.fillStyle = active ? '#ffcc44' : '#664400';
     ctx.textAlign = 'center';
     ctx.fillText(tab, tx + (tabW-3)/2, tabY + 17);
@@ -6471,11 +6883,12 @@ function drawLoreMenu(timestamp) {
   else if (loreTab === 6) drawLoreTabBiomes(contentX, drawY, contentW);
   else if (loreTab === 7) drawLoreTabModes(contentX, drawY, contentW);
   else if (loreTab === 8) drawLoreTabCombos(contentX, drawY, contentW);
+  else if (loreTab === 9) { a11yOpen = true; a11yCursor = 0; A11Y_pending = Object.assign({}, A11Y); loreOpen = false; }
 
   ctx.restore();
 
   // Scroll hint
-  ctx.font = '6px "Press Start 2P"';
+  ctx.font = fsc(6);
   ctx.fillStyle = '#442200';
   ctx.textAlign = 'center';
   ctx.fillText('SCROLL TO READ MORE   ◄ A / D ► TABS   ESC CLOSE', W/2, my + mh - 10);
@@ -6484,7 +6897,7 @@ function drawLoreMenu(timestamp) {
 
 // ── helpers ──────────────────────────────────────────────────
 function lSec(title, color, x, cy) {
-  ctx.font = '9px "Press Start 2P"';
+  ctx.font = fsc(9);
   ctx.fillStyle = color;
   ctx.fillText(title, x, cy); cy += 8;
   ctx.fillStyle = color.replace(/[^,]+(?=\))/, '0.3');
@@ -6551,7 +6964,7 @@ function drawLoreTabLore(x, cy, w) {
   // Divider with label
   ctx.fillStyle = '#221408';
   ctx.fillRect(x, cy, w - 4, 1); cy += 14;
-  ctx.font = '7px "Press Start 2P"';
+  ctx.font = fs(7);
   ctx.fillStyle = '#554433';
   ctx.fillText('RECOVERED DOCUMENTS', x, cy); cy += 18;
 
@@ -6565,7 +6978,7 @@ function drawLoreTabLore(x, cy, w) {
   ctx.fillRect(x+2, cy+2, w-8, 1);
   ctx.fillRect(x+2, cy+105, w-8, 1);
   cy += 12;
-  ctx.font = '6px "Press Start 2P"';
+  ctx.font = fs(6);
   ctx.fillStyle = '#887755';
   ctx.fillText('I.  cloth scrap, found near the entrance stair', x + 8, cy); cy += 14;
   ctx.fillStyle = '#554422'; ctx.fillRect(x+8, cy, w-20, 1); cy += 10;
@@ -6593,7 +7006,7 @@ function drawLoreTabLore(x, cy, w) {
   ctx.strokeStyle = '#1e2e38'; ctx.lineWidth = 1;
   ctx.strokeRect(x, cy, w - 4, 116);
   cy += 12;
-  ctx.font = '6px "Press Start 2P"';
+  ctx.font = fs(6);
   ctx.fillStyle = '#557788';
   ctx.fillText('II.  scratched into a wall, second biome', x + 8, cy); cy += 14;
   ctx.fillStyle = '#1e3040'; ctx.fillRect(x+8, cy, w-20, 1); cy += 10;
@@ -6630,7 +7043,7 @@ function drawLoreTabLore(x, cy, w) {
   ctx.fillRect(x, cy+117, 6, 1); ctx.fillRect(x, cy+112, 1, 6);
   ctx.fillRect(x+w-5, cy+117, 5, 1); ctx.fillRect(x+w-5, cy+112, 1, 6);
   cy += 12;
-  ctx.font = '6px "Press Start 2P"';
+  ctx.font = fs(6);
   ctx.fillStyle = '#882233';
   ctx.fillText("III.  the dungeon's own ledger, author unknown", x + 8, cy); cy += 14;
   ctx.fillStyle = '#330011'; ctx.fillRect(x+8, cy, w-20, 1); cy += 10;
@@ -6701,7 +7114,7 @@ function drawLoreTabStory(x, cy, w) {
     const badge = cleared ? '✓ CLEARED' : current ? '▶ CURRENT' : '— LOCKED';
     const badgeCol = cleared ? '#44aa44' : current ? '#aaddff' : '#332222';
     cy = lLine(act.title, x+8, cy+8, cleared ? act.col : current ? '#aaddff' : '#443322', 8, 14);
-    ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = badgeCol;
+    ctx.font = fs(5); ctx.fillStyle = badgeCol;
     ctx.fillText(badge, x+w-90, cy-12);
     for (const l of act.lines) {
       cy = lLine(l, x+8, cy, cleared ? '#667755' : current ? '#446688' : '#332222', 6, 13);
@@ -6717,15 +7130,15 @@ function drawLoreTabControls(x, cy, w) {
   const col2 = x + 220;
 
   function kRow(key, desc, note) {
-    ctx.font = '7px "Press Start 2P"';
+    ctx.font = fs(7);
     ctx.fillStyle = KEY_COL;
     ctx.fillText(key, x + 6, cy);
-    ctx.font = '6px "Press Start 2P"';
+    ctx.font = fs(6);
     ctx.fillStyle = DESC_COL;
     ctx.fillText(desc, col2, cy);
     if (note) {
       cy += 12;
-      ctx.font = '5px "Press Start 2P"';
+      ctx.font = fs(5);
       ctx.fillStyle = DIM_COL;
       ctx.fillText(note, col2, cy);
     }
@@ -6780,13 +7193,13 @@ function drawLoreTabControls(x, cy, w) {
       ['SWIPE DOWN',      'Throw bomb',              'buy from shop first'],
     ];
     for (const [key, desc, note] of tRows) {
-      ctx.font = '6px "Press Start 2P"'; ctx.fillStyle = '#ffcc44';
+      ctx.font = fs(6); ctx.fillStyle = '#ffcc44';
       ctx.fillText(key, x + 6, cy);
-      ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#997755';
+      ctx.font = fs(5); ctx.fillStyle = '#997755';
       ctx.fillText(desc, x + 180, cy);
       if (note) {
         cy += 11;
-        ctx.font = '4px "Press Start 2P"'; ctx.fillStyle = '#554433';
+        ctx.font = fs(4); ctx.fillStyle = '#554433';
         ctx.fillText(note, x + 180, cy);
       }
       cy += 13;
@@ -6800,9 +7213,9 @@ function drawLoreTabControls(x, cy, w) {
       ['btm-right',  'Mute / unmute'],
     ];
     for (const [pos, desc] of cRows) {
-      ctx.font = '6px "Press Start 2P"'; ctx.fillStyle = '#aa8844';
+      ctx.font = fs(6); ctx.fillStyle = '#aa8844';
       ctx.fillText(pos, x + 6, cy);
-      ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#997755';
+      ctx.font = fs(5); ctx.fillStyle = '#997755';
       ctx.fillText(desc, x + 150, cy);
       cy += 13;
     }
@@ -6818,9 +7231,9 @@ function drawLoreTabCombat(x, cy, w) {
     ['1/2/3',          '#aaaaaa', 'Quick-equip sword/torch/bow at any time during play.'],
   ];
   for (const [key, col, desc] of weaponRows) {
-    ctx.font = '7px "Press Start 2P"'; ctx.fillStyle = col;
+    ctx.font = fs(7); ctx.fillStyle = col;
     ctx.fillText(key, x + 4, cy); cy += 12;
-    ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#776655';
+    ctx.font = fs(5); ctx.fillStyle = '#776655';
     ctx.fillText(desc, x + 4, cy); cy += 14;
   }
   cy += 4;
@@ -6832,9 +7245,9 @@ function drawLoreTabCombat(x, cy, w) {
     ['BOMB [G]',        '#ff8800', 'Throw a bomb — 1.2s fuse, explodes in radius 3. Buy from shop. Knocks enemies back.'],
   ];
   for (const [key, col, desc] of abilRows) {
-    ctx.font = '7px "Press Start 2P"'; ctx.fillStyle = col;
+    ctx.font = fs(7); ctx.fillStyle = col;
     ctx.fillText(key, x + 4, cy); cy += 12;
-    ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#776655';
+    ctx.font = fs(5); ctx.fillStyle = '#776655';
     ctx.fillText(desc, x + 4, cy); cy += 14;
   }
   cy += 4;
@@ -6852,7 +7265,7 @@ function drawLoreTabCombat(x, cy, w) {
     'HARDCORE only: buy a Dungeon Key from the merchant to open secret rooms (reusable).',
   ];
   for (const tip of tips) {
-    ctx.font = '5px "Press Start 2P"'; ctx.fillStyle = '#776655';
+    ctx.font = fs(5); ctx.fillStyle = '#776655';
     ctx.fillText('• ' + tip, x + 4, cy); cy += 13;
   }
 }
@@ -6880,7 +7293,7 @@ function drawLoreTabEnemies(x, cy, w) {
     ctx.fillStyle = isBoss ? '#ffcc44' : '#ddbb88';
     ctx.fillText((isBoss ? '★ BOSS: ' : '') + def.name, x + 18, cy); cy += 13;
 
-    ctx.font = '6px "Press Start 2P"';
+    ctx.font = fs(6);
     ctx.fillStyle = '#776655';
     ctx.fillText(`HP: ${def.hp}   DMG: ${def.dmg}   REWARD: ${def.reward}g`, x + 18, cy); cy += 11;
 
@@ -6949,7 +7362,7 @@ function drawLoreTabItems(x, cy, w) {
       ctx.strokeStyle = '#221100'; ctx.lineWidth = 1;
       ctx.strokeRect(x + 2, cy - 8, 10, 10);
       // Name
-      ctx.font = '8px "Press Start 2P"';
+      ctx.font = fs(8);
       ctx.fillStyle = '#ddbb88';
       ctx.fillText(item.name, x + 18, cy);
       // Value
@@ -6958,7 +7371,7 @@ function drawLoreTabItems(x, cy, w) {
         ctx.fillText(item.value, col2 - 10, cy);
       }
       // Desc
-      ctx.font = '7px "Press Start 2P"';
+      ctx.font = fs(7);
       ctx.fillStyle = '#775544';
       ctx.fillText(item.desc, col2 + (item.value ? 55 : 0), cy);
       cy += 16;
@@ -7015,7 +7428,7 @@ function drawLoreTabBiomes(x, cy, w) {
     const bx = x + 22;
     cy = lLine(b.name.toUpperCase(), bx, cy, '#ffcc44', 10, 16);
     cy = lLine(bd.desc, bx, cy, '#aa8855', 7, 13);
-    ctx.font = '6px "Press Start 2P"';
+    ctx.font = fs(6);
     ctx.fillStyle = '#664433';
     ctx.fillText('OBJECTS: ' + bd.objects, bx, cy); cy += 13;
     ctx.fillStyle = '#554433';
@@ -7117,7 +7530,7 @@ function drawLoreTabCombos(x, cy, w) {
     const ix = x + 12;
 
     // Discovery state badge
-    ctx.font = '5px "Press Start 2P"';
+    ctx.font = fs(5);
     if (discovered) {
       ctx.fillStyle = syn.color;
       ctx.textAlign = 'right';
@@ -7131,12 +7544,12 @@ function drawLoreTabCombos(x, cy, w) {
     }
 
     // Synergy name
-    ctx.font = '8px "Press Start 2P"';
+    ctx.font = fs(8);
     ctx.fillStyle = discovered ? syn.color : '#442255';
     ctx.fillText(syn.name, ix, cy + 14);
 
     // Required items
-    ctx.font = '5px "Press Start 2P"';
+    ctx.font = fs(5);
     ctx.fillStyle = discovered ? '#887799' : '#332244';
     ctx.fillText('REQUIRES: ' + syn.hint, ix, cy + 26);
 
@@ -7146,7 +7559,7 @@ function drawLoreTabCombos(x, cy, w) {
     ctx.beginPath(); ctx.moveTo(ix, cy + 32); ctx.lineTo(x + w - 12, cy + 32); ctx.stroke();
 
     // Effect description
-    ctx.font = '6px "Press Start 2P"';
+    ctx.font = fs(6);
     ctx.fillStyle = discovered ? '#aa88bb' : '#332233';
     // Word-wrap the desc
     const descWords = syn.desc.split(' ');
@@ -7203,15 +7616,15 @@ function drawQuitConfirm() {
   ctx.strokeRect(px+4, py+4, pw-8, ph-8);
 
   ctx.textAlign = 'center';
-  ctx.font = '10px "Press Start 2P"';
+  ctx.font = fsc(10);
   ctx.fillStyle = '#cc88ff';
   ctx.fillText('ABANDON RUN?', W/2, py + 34);
 
-  ctx.font = '6px "Press Start 2P"';
+  ctx.font = fsc(6);
   ctx.fillStyle = '#664477';
   ctx.fillText('your gold and progress will be lost', W/2, py + 54);
 
-  ctx.font = '7px "Press Start 2P"';
+  ctx.font = fsc(7);
   ctx.fillStyle = '#ff4466';
   ctx.fillText('ENTER  \u2014  yes, return to menu', W/2, py + 80);
   ctx.fillStyle = '#446644';
@@ -7281,7 +7694,7 @@ function drawBossHealthBar(timestamp) {
   ctx.strokeRect(bx, by, bw, bh);
 
   // Boss name
-  ctx.font = '6px "Press Start 2P"';
+  ctx.font = fsc(6);
   ctx.textAlign = 'center';
   if (shielded) {
     ctx.fillStyle = '#aaaacc';
@@ -7383,7 +7796,8 @@ function rollRandomEvent(pcx, pcy) {
   const wy = pcy * CHUNK + Math.floor(CHUNK/2);
   activeEvent = { def, wx, wy, triggered: false };
 
-  banners.push({ text: def.banner, color: def.bannerColor, life: 3500, maxLife: 3500 });
+  const _bMult = A11Y_BANNER_MULTS[A11Y.bannerSpeed] || 1;
+  banners.push({ text: def.banner, color: def.bannerColor, life: 3500*_bMult, maxLife: 3500*_bMult });
 }
 
 function checkEventTrigger() {
@@ -7538,17 +7952,17 @@ function drawBoostOverlay(timestamp) {
   ctx.strokeStyle='#44ffaa'; ctx.lineWidth=2; ctx.strokeRect(bx,by,bw,bh);
   ctx.strokeStyle='#113322'; ctx.lineWidth=1; ctx.strokeRect(bx+4,by+4,bw-8,bh-8);
 
-  ctx.font='8px "Press Start 2P"';
+  ctx.font = fs(8);
   ctx.fillStyle='#44ffaa';
   ctx.textAlign='center';
   ctx.fillText('BOOST INVENTORY', W/2, by+24);
-  ctx.font='5px "Press Start 2P"';
+  ctx.font = fs(5);
   ctx.fillStyle='#226644';
   ctx.fillText(`${boostInventory.length} boosts saved  —  use ENTER to activate, A/D to select`, W/2, by+40);
   ctx.textAlign='left';
 
   if (boostInventory.length === 0) {
-    ctx.font='6px "Press Start 2P"';
+    ctx.font = fs(6);
     ctx.fillStyle='#224433';
     ctx.textAlign='center';
     ctx.fillText('No boosts saved.', W/2, by+bh/2);
@@ -7578,17 +7992,17 @@ function drawBoostOverlay(timestamp) {
       // Number badge
       ctx.fillStyle='#113322';
       ctx.fillRect(sx2+2,sy2+2,16,12);
-      ctx.font='5px "Press Start 2P"';
+      ctx.font = fs(5);
       ctx.fillStyle='#44ffaa';
       ctx.fillText(`#${i+1}`,sx2+4,sy2+11);
 
       // Name
-      ctx.font='6px "Press Start 2P"';
+      ctx.font = fs(6);
       ctx.fillStyle=sel?b2.color:'#448866';
       ctx.fillText(b2.name,sx2+8,sy2+34);
 
       // Desc
-      ctx.font='5px "Press Start 2P"';
+      ctx.font = fs(5);
       ctx.fillStyle='#226644';
       ctx.fillText(b2.desc,sx2+8,sy2+48);
 
@@ -7600,7 +8014,7 @@ function drawBoostOverlay(timestamp) {
     });
   }
 
-  ctx.font='5px "Press Start 2P"';
+  ctx.font = fs(5);
   ctx.fillStyle='#224433';
   ctx.textAlign='center';
   ctx.fillText('A/D: SELECT     ENTER: USE     Z/ESC: CLOSE', W/2, by+bh-10);
@@ -7751,6 +8165,22 @@ document.addEventListener('keydown', e => {
   if (!MUSIC.running && SFX.ctx && SFX.master) MUSIC.init(SFX.ctx, SFX.master);
   keys[e.key] = true;
   e.preventDefault();
+  checkHerzlich(e.key);
+  // Credits open — only ESC closes it, everything else feeds into CLAUDE sequence
+  if (creditsOpen) {
+    if (e.key === 'Escape') { creditsOpen = false; _cIdx = 0; }
+    return;
+  }
+  // A11Y menu — highest priority, intercepts all keys when open
+  if (a11yOpen) {
+    if (e.key === 'ArrowUp'   || e.key === 'w' || e.key === 'W') { a11yCursor = Math.max(0, a11yCursor-1); SFX.play('menu_move'); }
+    if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') { a11yCursor = Math.min(A11Y_ROWS.length-1, a11yCursor+1); SFX.play('menu_move'); }
+    if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') { a11yAdjust(A11Y_ROWS[a11yCursor], -1); SFX.play('menu_move'); }
+    if (e.key === 'ArrowRight'|| e.key === 'd' || e.key === 'D') { a11yAdjust(A11Y_ROWS[a11yCursor],  1); SFX.play('menu_move'); }
+    if (e.key === 'Enter') { a11yCommit(); a11yOpen = false; SFX.play('menu_confirm'); }
+    if (e.key === 'Escape') { a11yCancel(); a11yOpen = false; SFX.play('menu_move'); }
+    return;
+  }
   if (e.key === 'Tab' && ghost && ghost.active) { skipGhost(); return; }
 
   // ── Start menu ──────────────────────────────────────────────
@@ -7925,6 +8355,9 @@ document.addEventListener('keydown', e => {
     if (e.key === 'v' || e.key === 'V') {
       vaultOpen = true; vaultCursor = 0; SFX.play('menu_move'); return;
     }
+    if (e.key === 'a' || e.key === 'A') {
+      a11yOpen = true; a11yCursor = 0; A11Y_pending = Object.assign({}, A11Y); SFX.play('menu_move'); return;
+    }
     if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
       // 2x2 grid: left/right within row, wrap within row only
       startMenuCursor = startMenuCursor % 2 === 0 ? startMenuCursor : startMenuCursor - 1;
@@ -7972,6 +8405,8 @@ document.addEventListener('keydown', e => {
 
   // Lore menu toggle
   if (e.key === '?' || e.key === 'h' || e.key === 'H') {
+    // Don't open lore if credits are open or mid-HERZLICH sequence
+    if (creditsOpen || _hIdx > 0) return;
     loreOpen = !loreOpen;
     shopOpen = false;
     return;
@@ -8372,7 +8807,7 @@ function drawScene(timestamp) {
         const chunk = getChunk(cxc, cyc);
         const tile = chunk.tiles[ly*CHUNK+lx];
         const variant = chunk.floorVariants[ly*CHUNK+lx];
-        const biome = chunk.biome;
+        const biome = hcBiome(chunk.biome);
         const isExplored = explored.has(`${wx},${wy}`);
 
         if (!isExplored) continue;
@@ -8722,7 +9157,7 @@ function drawScene(timestamp) {
   ctx.drawImage(miniCanvas, W - miniW - 8, 8);
 
   // Landmark name labels in world (discovered, nearby)
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fs(5);
   ctx.textAlign = 'center';
   for (const [, lm] of discoveredLandmarks) {
     if (!lm.discovered) continue;
@@ -8741,7 +9176,7 @@ function drawScene(timestamp) {
   ctx.textAlign = 'left';
 
   // Shop key hint (bottom-left corner)
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fs(5);
   ctx.fillStyle = shopOpen ? '#ff9900' : '#443300';
   ctx.fillText('[E] SHOP', 8, H - 10);
   ctx.fillStyle = loreOpen ? '#ff9900' : '#443300';
@@ -8756,7 +9191,7 @@ function drawScene(timestamp) {
   ctx.fillStyle = oilColor;  ctx.fillRect(barX, barY, Math.floor(barW * oilPct), barH);
   ctx.strokeStyle = '#442200'; ctx.lineWidth = 1;
   ctx.strokeRect(barX, barY, barW, barH);
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fs(5);
   ctx.fillStyle = oilColor;
   ctx.fillText('OIL', barX - 24, barY + 7);
 
@@ -8768,12 +9203,12 @@ function drawScene(timestamp) {
   ctx.fillStyle = hpColor;  ctx.fillRect(barX, hpBarY, Math.floor(barW * hpPct), barH);
   ctx.strokeStyle = '#224422'; ctx.lineWidth = 1;
   ctx.strokeRect(barX, hpBarY, barW, barH);
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fs(5);
   ctx.fillStyle = hpColor;
   ctx.fillText('HP', barX - 18, hpBarY + 7);
 
   // Mode badge (top left)
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fs(5);
   const modeLabel = gameMode === 'easy' ? '★ EASY' : gameMode === 'hardcore' ? '☠ HARDCORE' : gameMode === 'story' ? '◆ STORY' : '⚔ COMBAT';
   const modeColor = gameMode === 'easy' ? '#44cc88' : gameMode === 'hardcore' ? '#ff2244' : gameMode === 'story' ? '#aaddff' : '#ff6622';
   ctx.fillStyle = modeColor;
@@ -8782,7 +9217,7 @@ function drawScene(timestamp) {
   // Story mode: act indicator + compass
   if (gameMode === 'story' && storyAct > 0) {
     const act = STORY_ACTS[storyAct - 1];
-    ctx.font = '5px "Press Start 2P"';
+    ctx.font = fs(5);
     ctx.fillStyle = '#446688';
     ctx.fillText(`ACT ${storyAct}: ${act.name}`, 8, 26);
     // Act progress dots
@@ -8802,13 +9237,13 @@ function drawScene(timestamp) {
       if (inArena && !bossCleared) {
         // Pulsing boss name warning
         const bp = Math.floor(timestamp/300)%2===0;
-        ctx.font = '5px "Press Start 2P"';
+        ctx.font = fs(5);
         ctx.fillStyle = bp ? (act5 ? act5.bossColor : '#ff4444') : '#223344';
         ctx.textAlign = 'center';
         ctx.fillText('⚠ ' + (act5 ? act5.bossName : 'BOSS'), W/2, 18);
         ctx.textAlign = 'left';
       } else if (nearGate && !bossCleared) {
-        ctx.font = '5px "Press Start 2P"';
+        ctx.font = fs(5);
         ctx.fillStyle = '#335566';
         ctx.textAlign = 'center';
         ctx.fillText('GATE SEALED — FIND THE BOSS', W/2, 18);
@@ -8827,7 +9262,7 @@ function drawScene(timestamp) {
         ctx.moveTo(12, 0); ctx.lineTo(-8, -6); ctx.lineTo(-8, 6);
         ctx.closePath(); ctx.fill();
         ctx.restore();
-        ctx.font = '4px "Press Start 2P"';
+        ctx.font = fs(4);
         ctx.fillStyle = '#446688';
         ctx.textAlign = 'center';
         ctx.fillText('BOSS', W-30, 50);
@@ -8841,7 +9276,7 @@ function drawScene(timestamp) {
     const wNames = { sword: '⚔ SWORD', torch_weapon: '🔥 TORCH', bow: '🏹 BOW' };
     const wColors = { sword: '#ffdd44', torch_weapon: '#ff6600', bow: '#88ccff' };
     const wn = player.weapon || 'sword';
-    ctx.font = '5px "Press Start 2P"';
+    ctx.font = fs(5);
     ctx.fillStyle = wColors[wn] || '#ffdd44';
     ctx.fillText(wNames[wn] || wn, 8, 28);
 
@@ -8861,7 +9296,7 @@ function drawScene(timestamp) {
       ctx.strokeStyle = '#443300'; ctx.lineWidth = 1;
       ctx.strokeRect(cbX, cbY, cbW, cbH);
       if (chargeFrac >= 1) {
-        ctx.font = '4px "Press Start 2P"';
+        ctx.font = fs(4);
         ctx.fillStyle = '#ff2200';
         ctx.fillText('CHARGED!', cbX, cbY - 2);
       }
@@ -8869,7 +9304,7 @@ function drawScene(timestamp) {
 
     // Ground pound cooldown label
     const gpReady = groundPoundCooldown <= 0;
-    ctx.font = '5px "Press Start 2P"';
+    ctx.font = fs(5);
     ctx.fillStyle = gpReady ? '#ffaa00' : '#443300';
     ctx.fillText('[F] ' + (gpReady ? 'POUND' : '...'), barX, hpBarY - 20);
 
@@ -8882,11 +9317,15 @@ function drawScene(timestamp) {
   // Active merchant/hazard effect icons
   {
     let iconY2 = 28;
-    ctx.font = '5px "Press Start 2P"';
+    ctx.font = fs(5);
     if (boostInventory.length > 0) { ctx.fillStyle='#44ffaa'; ctx.fillText(`[Z] BOOSTS: ${boostInventory.length}`, 8, iconY2); iconY2+=11; }
-    if (gameMode === 'playground') {
+    // Void class HUD name glitch
+  if (META.selectedClass === 'void' && Math.random() < 0.02) {
+    spawnFloatText(player.wx, player.wy-1, '▓▓▓▓', '#ffffff');
+  }
+  if (gameMode === 'playground') {
       ctx.fillStyle = '#335533';
-      ctx.font = '5px "Press Start 2P"';
+      ctx.font = fs(5);
       ctx.textAlign = 'left';
       ctx.fillText('🔧 SEED: ' + pgCfg.seed, 8, iconY2); iconY2 += 11;
       if (pgCfg.godMode) { ctx.fillStyle = '#44ff88'; ctx.fillText('GOD MODE', 8, iconY2); iconY2 += 11; }
@@ -8921,6 +9360,8 @@ function drawScene(timestamp) {
   // Milestone banners
   drawBanners(timestamp);
   if (quitConfirm) drawQuitConfirm();
+  if (creditsOpen) drawCreditsScreen(timestamp);
+  if (a11yOpen) drawA11YMenu(timestamp);
   if (gameStarted && !isDead) drawBossHealthBar(timestamp);
 
   // Corpse compass
@@ -8977,7 +9418,7 @@ function drawBanners(timestamp) {
     ctx.globalAlpha = alpha;
 
     // Set font FIRST so measureText is accurate
-    ctx.font = '8px "Press Start 2P"';
+    ctx.font = fs(8);
     const measured = ctx.measureText(b.text).width;
     const PAD_X = 24, PAD_Y = 10, LINE_H = 12;
     const maxTw = W - 32;
@@ -9097,7 +9538,7 @@ function drawDeathScreen(timestamp) {
 
   // Title
   ctx.textAlign = 'center';
-  ctx.font = '18px "Press Start 2P"';
+  ctx.font = fsc(18);
   ctx.fillStyle = '#dd0022';
   ctx.fillText('YOUR LIGHT WENT OUT', W/2, py + 42);
 
@@ -9105,15 +9546,15 @@ function drawDeathScreen(timestamp) {
   if (deathStats) {
     const killer = deathStats.killerName || 'the dark';
     const biome  = deathStats.biome || 'the dungeon';
-    ctx.font = '8px "Press Start 2P"';
+    ctx.font = fsc(8);
     ctx.fillStyle = '#aa4444';
     ctx.fillText('slain by ' + killer + '   —   in ' + biome, W/2, py + 62);
     if (gameMode === 'playground') {
-      ctx.font = '6px "Press Start 2P"'; ctx.fillStyle = '#44aa55'; ctx.textAlign = 'center';
+      ctx.font = fsc(6); ctx.fillStyle = '#44aa55'; ctx.textAlign = 'center';
       ctx.fillText('SEED: ' + pgCfg.seed, W/2, statY); statY += 14;
     }
     if (deathStats.curses) {
-      ctx.font = '7px "Press Start 2P"';
+      ctx.font = fsc(7);
       ctx.fillStyle = '#993377';
       ctx.fillText('cursed run: ' + deathStats.curses, W/2, py + 78);
     }
@@ -9129,7 +9570,7 @@ function drawDeathScreen(timestamp) {
     let lyy = py + 108, ryy = py + 108;
 
     // Column headers
-    ctx.font = '8px "Press Start 2P"';
+    ctx.font = fsc(8);
     ctx.fillStyle = '#cc4433'; ctx.textAlign = 'left';
     ctx.fillText('THIS RUN', colL, lyy);
     ctx.fillStyle = '#886644';
@@ -9156,7 +9597,7 @@ function drawDeathScreen(timestamp) {
     ];
 
     for (const s of leftStats) {
-      ctx.font = '8px "Press Start 2P"';
+      ctx.font = fsc(8);
       ctx.fillStyle = '#aa7755'; ctx.textAlign = 'left';
       ctx.fillText(s.label, colL, lyy);
       ctx.fillStyle = s.star ? '#ffdd44' : '#eeccaa';
@@ -9165,7 +9606,7 @@ function drawDeathScreen(timestamp) {
       lyy += 22;
     }
     for (const s of rightStats) {
-      ctx.font = '8px "Press Start 2P"';
+      ctx.font = fsc(8);
       ctx.fillStyle = '#886655'; ctx.textAlign = 'left';
       ctx.fillText(s.label, colR, ryy);
       ctx.fillStyle = '#ccbb99';
@@ -9178,10 +9619,10 @@ function drawDeathScreen(timestamp) {
     const echY = py + ph - 114;
     ctx.fillStyle = '#33004d';
     ctx.fillRect(px+24, echY, pw-48, 2);
-    ctx.font = '9px "Press Start 2P"';
+    ctx.font = fsc(9);
     ctx.fillStyle = '#ee99ff'; ctx.textAlign = 'center';
     ctx.fillText('◆  ' + (deathStats.echoes||0) + ' ECHOES EARNED     total: ' + META.echoes, W/2, echY + 20);
-    ctx.font = '7px "Press Start 2P"';
+    ctx.font = fsc(7);
     ctx.fillStyle = '#66aa55';
     ctx.fillText('your remains lie where you fell — find them to recover your gold', W/2, echY + 38);
 
@@ -9194,7 +9635,7 @@ function drawDeathScreen(timestamp) {
       ctx.strokeStyle = '#337733'; ctx.lineWidth = 1;
       ctx.strokeRect(px+24, tipBoxY, pw-48, 38);
       // word-wrap across two lines if needed
-      ctx.font = '7px "Press Start 2P"';
+      ctx.font = fsc(7);
       ctx.fillStyle = '#99ee88';
       ctx.textAlign = 'center';
       const maxW = pw - 80;
@@ -9216,7 +9657,7 @@ function drawDeathScreen(timestamp) {
 
   // Restart prompt
   if (age > 1800 && Math.floor(age/500) % 2 === 0) {
-    ctx.font = '10px "Press Start 2P"';
+    ctx.font = fsc(10);
     ctx.fillStyle = '#ff5555'; ctx.textAlign = 'center';
     ctx.fillText('PRESS  R  TO DESCEND AGAIN', W/2, py + ph - 18);
   }
@@ -9370,7 +9811,7 @@ function drawCutscene(timestamp) {
 
   // Prompt
   const blink = Math.floor(timestamp / 500) % 2 === 0;
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fs(5);
   ctx.fillStyle = blink ? '#446688' : '#223344';
   ctx.fillText('SPACE — CONTINUE', W/2, H - 14);
   ctx.textAlign = 'left';
@@ -9472,7 +9913,7 @@ function drawCutsceneArt(artType, timestamp) {
     }
   } else if (artType === 'carving') {
     ctx.fillStyle = '#334433'; ctx.fillRect(cx2-50, cy2-30, 100, 60);
-    ctx.fillStyle = '#ddcc88'; ctx.font = '6px "Press Start 2P"'; ctx.textAlign = 'center';
+    ctx.fillStyle = '#ddcc88'; ctx.font = fs(6); ctx.textAlign = 'center';
     ctx.fillText('do not', cx2, cy2-6);
     ctx.fillText('follow me', cx2, cy2+8);
     ctx.textAlign = 'left';
@@ -9618,13 +10059,13 @@ function drawVictoryScreen(timestamp) {
 
   ctx.shadowColor = `rgba(170,220,255,${pulse})`;
   ctx.shadowBlur = 20;
-  ctx.font = '14px "Press Start 2P"';
+  ctx.font = fs(14);
   ctx.fillStyle = '#aaddff';
   ctx.textAlign = 'center';
   ctx.fillText('YOU BROUGHT HER HOME.', W/2, H/2 - 40);
   ctx.shadowBlur = 0;
 
-  ctx.font = '6px "Press Start 2P"';
+  ctx.font = fs(6);
   ctx.fillStyle = '#446688';
   ctx.fillText('The dungeon is sealed.', W/2, H/2);
   ctx.fillText('The staircase will not open again.', W/2, H/2 + 18);
@@ -9871,14 +10312,31 @@ function resetRun() {
   for (const u of upgrades) u.level = 0;
   applyUpgrades();
 
+  // Force-generate origin chunk before placing player
+  getChunk(0, 0);
+  // Spiral search from (2,2) for a walkable floor tile
   player.wx = 2; player.wy = 2;
-  player.px = 2*TILE; player.py = 2*TILE;
-  for (let i = 0; i < 50; i++) {
-    if (isWalkable(player.wx, player.wy)) break;
-    player.wx++; player.wy++;
+  outer: for (let radius = 0; radius < 16; radius++) {
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        if (Math.abs(dx) !== radius && Math.abs(dy) !== radius) continue;
+        const tx = 2 + dx, ty = 2 + dy;
+        if (tx < 0 || ty < 0) continue;
+        // Force-generate the chunk this tile is in
+        getChunk(Math.floor(tx/CHUNK), Math.floor(ty/CHUNK));
+        const t = getTile(tx, ty);
+        if (t === T.FLOOR || t === T.CORRIDOR) {
+          player.wx = tx; player.wy = ty;
+          break outer;
+        }
+      }
+    }
   }
   player.px = player.wx * TILE;
   player.py = player.wy * TILE;
+  player.targetWx = player.wx; player.targetWy = player.wy;
+  // Pre-warm nearby chunks so first few frames don't spike
+  preWarmChunks(player.wx, player.wy, 2);
   // Biome ambience + floor event detection
   if (gameStarted && !isDead && !storyCutscene && !victoryScreen) {
     const _bpcx = Math.floor(player.wx/CHUNK), _bpcy = Math.floor(player.wy/CHUNK);
@@ -9978,6 +10436,7 @@ function resetRun() {
   modifierScreen = false;
   playgroundScreen = false;
   activeModifiers.clear();
+  updateHUDVisibility();
   // Return to start menu so player can pick mode again
   gameStarted = false;
 }
@@ -10377,7 +10836,7 @@ function drawCorpse(ctx, sx, sy, lit, t) {
 
   // "REMAINS" label
   if (lit > 0.3) {
-    ctx.font = '5px "Press Start 2P"';
+    ctx.font = fs(5);
     ctx.fillStyle = `rgba(0,255,180,${a * pulse})`;
     ctx.textAlign = 'center';
     ctx.fillText('REMAINS', sx+8, sy+4);
@@ -10425,7 +10884,7 @@ function drawCorpseCompass(timestamp) {
 
   // Distance label
   const tilesDist = Math.round(dist);
-  ctx.font = '5px "Press Start 2P"';
+  ctx.font = fs(5);
   ctx.fillStyle = `rgba(0,255,180,${pulse})`;
   ctx.textAlign = 'center';
   ctx.fillText(`${tilesDist}`, cx2, cy2 + r + 10);
@@ -10533,7 +10992,7 @@ function drawShrine(ctx, sx, sy, lit, t, wx, wy, used) {
   }
   // Step text hint
   if (!used && lit > 0.3) {
-    ctx.font = '4px "Press Start 2P"';
+    ctx.font = fs(4);
     ctx.fillStyle = `rgba(200,150,255,${a*pulse})`;
     ctx.textAlign = 'center';
     ctx.fillText('STEP ON', sx+8, sy-2);
@@ -10562,7 +11021,7 @@ function drawVault(ctx, sx, sy, lit, t, wx, wy, opened) {
   }
   // Cost hint
   if (!opened && lit > 0.3) {
-    ctx.font = '4px "Press Start 2P"';
+    ctx.font = fs(4);
     ctx.fillStyle = `rgba(255,220,80,${a*shimmer})`;
     ctx.textAlign = 'center';
     ctx.fillText(`${VAULT_COST}g`, sx+8, sy+1);
@@ -10592,7 +11051,7 @@ function drawCursedAltar(ctx, sx, sy, lit, t, wx, wy, used) {
     ctx.fillStyle = gr; ctx.fillRect(sx-2, sy-2, 20, 20);
   }
   if (!used && lit > 0.3) {
-    ctx.font = '4px "Press Start 2P"';
+    ctx.font = fs(4);
     ctx.fillStyle = `rgba(255,100,255,${a*pulse})`;
     ctx.textAlign = 'center';
     ctx.fillText('CURSED', sx+8, sy+2);
@@ -10704,7 +11163,7 @@ function drawFloatingTexts(timestamp) {
     const alpha = ft.life > ft.maxLife * 0.3 ? 1 : ft.life / (ft.maxLife * 0.3);
     ctx.globalAlpha = alpha;
     ctx.fillStyle = ft.color;
-    ctx.font = '6px "Press Start 2P"';
+    ctx.font = fs(6);
     ctx.textAlign = 'center';
     // Shadow
     ctx.fillStyle = '#000';
@@ -10906,20 +11365,30 @@ document.addEventListener('visibilitychange', () => {
 });
 function loop(timestamp) {
   if (paused) { lastTime = timestamp; requestAnimationFrame(loop); return; }
-  const dt = Math.min(timestamp - lastTime, 100);
+  const dt = Math.min(timestamp - lastTime, 50);
   lastTime = timestamp;
   torchTime = timestamp;
+  // Process deferred chunk generation — max per frame to avoid freezes
+  let _genCount = 0;
+  while (_chunkGenQueue.length > 0 && _genCount < _MAX_CHUNKS_PER_FRAME) {
+    const [gcx, gcy] = _chunkGenQueue.shift();
+    const gkey = chunkKey(gcx, gcy);
+    if (!chunks.has(gkey)) generateChunk(gcx, gcy);
+    _genCount++;
+  }
 
   // ── Modifier screen ─────────────────────────────────────────
   if (playgroundScreen) {
     ctx.clearRect(0, 0, W, H);
     drawPlaygroundScreen(timestamp);
+    if (creditsOpen) drawCreditsScreen(timestamp);
     requestAnimationFrame(loop);
     return;
   }
   if (modifierScreen) {
     ctx.clearRect(0, 0, W, H);
     drawModifierScreen(timestamp);
+    if (creditsOpen) drawCreditsScreen(timestamp);
     requestAnimationFrame(loop);
     return;
   }
@@ -10938,6 +11407,8 @@ function loop(timestamp) {
     } else {
       drawStartMenu(timestamp);
     }
+    if (creditsOpen) drawCreditsScreen(timestamp);
+    if (a11yOpen) drawA11YMenu(timestamp);
     requestAnimationFrame(loop);
     return;
   }
@@ -10995,18 +11466,28 @@ function loop(timestamp) {
         const _drainUpgMult = 1 - getUpgradeValue('oildrain') * 0.10; // 10/20/30% reduction
         const _floodDrain = (floorEvent && floorEvent.id === 'flooded') ? 2.0 : 1.0;
         const _modDrain = hasMod('oil_miser') ? 2.0 : 1.0;
-        const _baseDrain = hasCurse('lightless') ? OIL_DRAIN_PER_STEP * 3 : OIL_DRAIN_PER_STEP;
+        const _voidMult = (META.selectedClass === 'void') ? 5.0 : 1.0;
+        const _baseDrain = hasCurse('lightless') ? OIL_DRAIN_PER_STEP * 3 * _voidMult : OIL_DRAIN_PER_STEP * _voidMult;
         const drainAmt = gameMode === 'story' ? _baseDrain * 0.4
           : (player.oilFilterTimer||0) > 0 ? _baseDrain * _modDrain * _drainUpgMult * 0.5
           : _baseDrain * _modDrain * _floodDrain * _drainUpgMult;
         oil = Math.max(0, oil - drainAmt);
+        // Void class: 1 HP self-damage per step
+        if (META.selectedClass === 'void' && !(gameMode==='playground'&&pgCfg.godMode)) {
+          if (player.hp > 1) {
+            player.hp -= 1;
+            if (player.hp <= 3) spawnFloatText(player.wx, player.wy, '-1', '#ffffff');
+          }
+        }
         // HP regen: 1 HP per 40 steps
-        player.regenTimer = (player.regenTimer || 0) + 1;
-        if (player.regenTimer >= (player.regenInterval || 40)) {
-          player.regenTimer = 0;
-          if (player.hp < player.maxHp) {
-            player.hp = Math.min(player.maxHp, player.hp + 1);
-            spawnFloatText(player.wx, player.wy, '+1 HP', '#44ff88');
+        if (META.selectedClass !== 'void') {
+          player.regenTimer = (player.regenTimer || 0) + 1;
+          if (player.regenTimer >= (player.regenInterval || 40)) {
+            player.regenTimer = 0;
+            if (player.hp < player.maxHp) {
+              player.hp = Math.min(player.maxHp, player.hp + 1);
+              spawnFloatText(player.wx, player.wy, '+1 HP', '#44ff88');
+            }
           }
         }
         if (oil <= 0) {
@@ -11113,6 +11594,7 @@ function loop(timestamp) {
 
   markVisible();
   checkMilestones();
+  updateHUDVisibility();
 
   // Tick floating texts
   for (const ft of floatingTexts) ft.life -= dt;
@@ -11153,9 +11635,9 @@ const isMobile = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
 
 if (isMobile) {
   document.getElementById('mobile-controls').classList.add('active');
-  // Hide desktop hint text
   const deskHint = document.getElementById('controls');
   if (deskHint) deskHint.style.display = 'none';
+  resizeGame(); // re-run after mobile controls shown
 }
 
 // ── Gesture state ────────────────────────────────────────
@@ -11167,6 +11649,15 @@ const _touch = {
   // Held move direction injected into keys[]
   moveDir: null,
 };
+
+function _touchScale() {
+  // Returns the current CSS scale factor so touch coords map to canvas coords
+  const s = canvas.style.transform.match(/scale\(([\d.]+)\)/);
+  return s ? parseFloat(s[1]) : 1;
+}
+
+function _canvasX(clientX) { return clientX / _touchScale(); }
+function _canvasY(clientY) { return clientY / _touchScale(); }
 
 const SWIPE_THRESH  = 18;  // px to register as directional swipe
 const MOVE_THRESH   = 12;  // px drag threshold for continuous move
@@ -11191,6 +11682,8 @@ const tzLeft = document.getElementById('tz-left');
 
 tzLeft.addEventListener('touchstart', e => {
   e.preventDefault();
+  SFX.init(); SFX.resume();
+  if (!gameStarted || isDead || modifierScreen || playgroundScreen || quitConfirm) return;
   const t = e.changedTouches[0];
   _touch.leftId = t.identifier;
   _touch.leftStartX = t.clientX; _touch.leftStartY = t.clientY;
@@ -11199,6 +11692,7 @@ tzLeft.addEventListener('touchstart', e => {
 
 tzLeft.addEventListener('touchmove', e => {
   e.preventDefault();
+  if (!gameStarted || isDead || modifierScreen || playgroundScreen || quitConfirm) return;
   for (const t of e.changedTouches) {
     if (t.identifier !== _touch.leftId) continue;
     _touch.leftX = t.clientX; _touch.leftY = t.clientY;
@@ -11222,6 +11716,8 @@ const tzRight = document.getElementById('tz-right');
 
 tzRight.addEventListener('touchstart', e => {
   e.preventDefault();
+  SFX.init(); SFX.resume();
+  if (!gameStarted || isDead || modifierScreen || playgroundScreen || quitConfirm) return;
   const t = e.changedTouches[0];
   _touch.rightId = t.identifier;
   _touch.rightStartX = t.clientX; _touch.rightStartY = t.clientY;
@@ -11229,6 +11725,7 @@ tzRight.addEventListener('touchstart', e => {
 
 tzRight.addEventListener('touchend', e => {
   e.preventDefault();
+  if (!gameStarted || isDead || modifierScreen || playgroundScreen || quitConfirm) return;
   for (const t of e.changedTouches) {
     if (t.identifier !== _touch.rightId) continue;
     _touch.rightId = null;
@@ -11242,17 +11739,15 @@ tzRight.addEventListener('touchend', e => {
     } else {
       // Swipe direction = ability
       if (Math.abs(dx) >= Math.abs(dy)) {
-        // Horizontal swipe
         if (dx > 0) {
-          // Swipe right = dash (face right first)
+          // Swipe right = dash
           player.faceDx = 1; player.faceDy = 0;
           doDash();
         } else {
-          // Swipe left = parry
-          if (PARRY_ENABLED) doParry();
+          // Swipe left = was parry (disabled), now ground pound
+          doGroundPound();
         }
       } else {
-        // Vertical swipe
         if (dy < 0) {
           // Swipe up = ground pound
           doGroundPound();
@@ -11265,7 +11760,22 @@ tzRight.addEventListener('touchend', e => {
   }
 }, { passive: false });
 
-// ── Corner buttons ────────────────────────────────────────
+// ── Canvas tap: advance start/dead screens on mobile ─────
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  SFX.init(); SFX.resume();
+  if (!gameStarted && !modifierScreen && !playgroundScreen) {
+    // Tap anywhere on start menu = confirm selection
+    const fakeEnter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true });
+    document.dispatchEvent(fakeEnter);
+  }
+  if (isDead) {
+    // Tap to restart
+    resetRun();
+  }
+}, { passive: false });
+
+
 document.getElementById('mc-lore').addEventListener('touchend', e => {
   e.preventDefault();
   loreOpen = !loreOpen; shopOpen = false; inventoryOpen = false;
